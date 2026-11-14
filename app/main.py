@@ -1,8 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.routes import router
+
 app = FastAPI(title="Firm Bulk Payments")
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+app.include_router(router)

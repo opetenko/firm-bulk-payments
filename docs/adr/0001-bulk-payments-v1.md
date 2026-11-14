@@ -29,10 +29,12 @@ Stack: Python 3.13, uv, FastAPI, Pydantic v2, SQLAlchemy 2.x, psycopg 3, Alembic
 
 Validation (all failures → 400):
 
-- `amount`: JSON string matching `^\d{1,10}(\.\d{1,2})?$`, value > 0; converted to integer cents.
-  All money in the model and database is integer cents.
-- `payments`: 1–1000 entries. `description`: 1–500 chars.
-- UUIDs parsed and normalized to lowercase.
+- `amount`: JSON string matching `^\d{1,9}(\.\d{1,2})?$` (ASCII digits only, whole string),
+  value greater than zero. Converted to integer cents by string splitting: no `float`,
+  no `Decimal` field type. All money in the model and database is integer cents.
+- `payments`: 1–1000 entries. `description`: 1–500 chars. Unknown fields are rejected.
+- `payee_firm_uuid`, `payer_firm_uuid`: Pydantic `UUID`; compared with the database as
+  `str(uuid)` (canonical lowercase).
 
 Responses, in evaluation order (first match wins):
 
@@ -129,6 +131,25 @@ COMMIT -> 201
 
 Verified by tests against real PostgreSQL (not SQLite): concurrent drain of one payer,
 concurrent A↔B payments, concurrent requests with one key.
+
+### Code structure
+
+```
+app/domain/          money parsing, BulkPaymentCommand, domain errors   (pure Python)
+app/application/     PayBulk use case: transaction and idempotency       (no retry loop)
+app/infrastructure/  engine, Core tables, the SQL of the transaction
+app/api/             Pydantic schemas, routes, exception handlers
+```
+
+Dependencies: api → application → domain, application → infrastructure. The domain
+imports nothing from other layers.
+
+### Deployment
+
+The app is stateless: two or more replicas behind nginx (round-robin, runtime DNS).
+Correctness relies only on PostgreSQL row locks, so it holds across processes. Migrations
+run once in a dedicated job before the replicas start. Demo firms are inserted by
+`scripts/seed.py`, never by a migration.
 
 ## Consequences
 

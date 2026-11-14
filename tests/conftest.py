@@ -7,6 +7,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, create_engine, make_url, text
 
+from scripts.seed import seed
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # A dedicated database, so tests never touch data in the dev database.
@@ -43,6 +45,8 @@ def migrated_engine() -> Iterator[Engine]:
     command.upgrade(cfg, "head")
 
     engine = create_engine(TEST_DATABASE_URL)
+    with engine.begin() as conn:
+        seed(conn)
     yield engine
     engine.dispose()
 
