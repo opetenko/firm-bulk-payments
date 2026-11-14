@@ -51,6 +51,22 @@ def migrated_engine() -> Iterator[Engine]:
     engine.dispose()
 
 
+def _reset_data(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("TRUNCATE payments, payment_batches, firms RESTART IDENTITY CASCADE")
+        )
+        seed(conn)
+
+
+@pytest.fixture
+def clean_engine(migrated_engine: Engine) -> Iterator[Engine]:
+    """For code that commits: seed-only data before the test, reset again after."""
+    _reset_data(migrated_engine)
+    yield migrated_engine
+    _reset_data(migrated_engine)
+
+
 @pytest.fixture
 def db(migrated_engine: Engine) -> Iterator[Connection]:
     """Connection inside a transaction that is always rolled back."""
