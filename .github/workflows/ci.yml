@@ -6,6 +6,23 @@ on:
   pull_request:
 
 jobs:
+  # Fast static checks, no database needed.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.26"
+      - run: uv python install 3.13
+      - run: uv sync --frozen
+      - name: Lint (ruff)
+        run: uv run ruff check .
+      - name: Format (ruff)
+        run: uv run ruff format --check .
+      - name: Type check (mypy --strict)
+        run: uv run mypy
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -31,4 +48,13 @@ jobs:
           version: "0.9.26"
       - run: uv python install 3.13
       - run: uv sync --frozen
-      - run: uv run pytest -v
+      - name: Tests with coverage (fails under 95%)
+        run: uv run pytest -v --cov --cov-report=term-missing
+
+  # The image docker-compose runs: catches a broken Dockerfile before `make up` does.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app image
+        run: docker build -t firm-bulk-payments:ci .

@@ -15,6 +15,8 @@ RUN uv sync --frozen --no-dev
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
+COPY scripts ./scripts
 
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Migrations run once in the compose `migrate` job, not in every replica.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

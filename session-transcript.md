@@ -1,0 +1,1044 @@
+# Session transcript: Firm Bulk Payments, core v1
+
+Questions and answers only (no tool calls, scripts or command output). Times are local: CET (UTC+0100).
+
+## User — 2026-11-13 17:06:28
+
+Let's skaffold the brnd new project in our organization which business context is - "Firm Payments: Build a bulk payment service.
+Goal
+Imagine you are a backend engineer at a practice management platform for accounting firms, like TaxDome. Thousands of
+firms work on the platform, from solo preparers to practices with hundreds of accountants. Each firm has a balance with
+us, and the money its clients pay on invoices lands there.
+Firms also work with each other. A large practice sends overflow returns to solo preparers during tax season, a
+bookkeeping firm hands its clients' tax returns to a preparer, and a firm that brings in a client gets a referral fee. Firms
+settle these debts through their balances on the platform, so the same firm pays some firms and gets paid by others.
+Paying everyone one by one would be slow and painful, so we let a firm pay everyone it owes in bulk." 
+The plan outline will be:
+1) Actualize the spec for first version of a product input i will porvide here in dialog mode as a very first step.
+2) Scaffold the minimal running project for this project by provided by me tech stack which currently used by our company for seamless integration into the company architecture.
+3) Start planing with me the solution and implementation. Implementation steps should be short unambigious and verifiable by tests. Pay attention on simplicty and following correctness according spec, consistency in highly concurrent usage, scalability of solution to extend.
+In your outcome be strict and do not hide feedback if I provided problematic assumptions.
+
+---
+
+## Assistant — 2026-11-13 17:06:38
+
+I've got the plan, and nothing is built yet. Step 1 is the spec, and you haven't given me its input, so I'm starting there. I'll scaffold nothing until the spec is agreed.
+
+**What I understand so far:** a bulk-payment service for a multi-tenant practice-management platform. Each firm has a platform-held balance, and one firm pays many firms from that balance in a single operation. A firm can be both payer and payee in the same period.
+
+Two things in the business context could shape the design, and I'd rather raise them now than after the scaffold:
+
+1. **Balance as a ledger.** If we hold firms' money, the balance can't be a mutable `balance` column. It needs an append-only ledger with idempotent, atomic debits and credits. This matters most for concurrency correctness.
+2. **Netting.** Firms both pay and get paid, so you could net obligations (A→B 100 and B→A 60 becomes A→B 40). That is a different product from paying each payee in full. I won't assume it's in scope, and you should decide that on purpose.
+
+**Open question:** describe the first version in your own words. What does a firm do, from start to finish, when it pays everyone it owes in one go? Include anything you already know is out of scope.
+
+I'll also need your company's tech stack (language, framework, database, queue, and so on) before step 2. Send that whenever it's convenient, together with the spec or separately.
+
+---
+
+## User — 2026-11-13 17:53:30
+
+Lets do step 1 and 2: Main goal now in first iteration of a product to provide simplest thing which is a provably correct under concurrency. The spec I created from requirements:
+
+* One endpoint "POST /bulk-payments" which is accepting Json document with payload example : 
+
+
+{
+// Identifies the firm that pays.
+"payer_firm_uuid": "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41",
+// Each entry is one payment to one firm.
+"payments": [
+{
+// Amount of the payment in US dollars, as a string, with at most
+// 2 optional decimal places. Always positive.
+"amount": "1200.75",
+// Identifies the firm that receives the payment.
+"payee_firm_uuid": "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10",
+// Description of the payment.
+"description": "Bookkeeping cleanup, 3 clients"
+},
+{
+"amount": "300",
+"payee_firm_uuid": "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25",
+"description": "Referral fee, 2 clients"
+}
+]
+}
+
+
+* Amounts of money may be sent different in string type field but I want you always convert them to dollar cents in the model and on data model work with cents.
+* For concurrency additionaly i am also wanted to introduce the header "Idempotency-Key" (1 to 255 printable characters). and some schema added to support system non functional requirements concurrency and consistency as possible. 
+* The schema: and 
+
+
+Seed the database with three firms:```
+firms                                            -- as in the spec
+  id            BIGINT PK
+  name          TEXT NOT NULL
+  balance_cents BIGINT NOT NULL  CHECK (balance_cents >= 0)
+  uuid          TEXT NOT NULL    UNIQUE
+
+payment_batches                                  -- added
+  id                  BIGINT PK (identity)
+  uuid                TEXT NOT NULL UNIQUE       -- public id, uuid4 generated by the app
+  payer_firm_id       BIGINT NOT NULL FK -> firms.id
+  idempotency_key     TEXT NULL
+  request_fingerprint TEXT NOT NULL              -- SHA-256 of the validated request, canonical JSON
+  total_cents         BIGINT NOT NULL CHECK (total_cents > 0)
+  payments_count      INTEGER NOT NULL CHECK (payments_count > 0)
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  UNIQUE (payer_firm_id, idempotency_key)        -- NULL keys do not conflict in PostgreSQL
+
+payments                                         -- spec columns unchanged, one column added
+  id            BIGINT PK (identity)
+  batch_id      BIGINT NOT NULL  FK -> payment_batches.id     -- added
+  payer_firm_id BIGINT NOT NULL  FK -> firms.id
+  payee_firm_id BIGINT NOT NULL  FK -> firms.id
+  amount_cents  BIGINT NOT NULL  CHECK (amount_cents > 0)
+  description   TEXT NOT NULL
+  CHECK (payer_firm_id <> payee_firm_id)
+  INDEX (batch_id), INDEX (payer_firm_id), INDEX (payee_firm_id)
+INSERT INTO firms (id, name, balance_cents, uuid)
+VALUES (1, 'Pinecrest CPA Group', 5000000, '3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41'),
+(2, 'Lopez Bookkeeping', 50000, '8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10'),
+(3, 'Nair Tax Services', 200000, 'e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25');
+
+
+* If the total of payload exceeds current payer balance return HTTP 422 and write nothing
+* Otherwise, in one transaction: insert one payments row per entry, debit the payer by the total, credit each payee, and return 201.
+* Example of API responses and different situations: 
+* |Success | 201, body `{"batch_uuid": "...", "payment_ids": [...], "total_cents": N}` |
+* | Replay of an already applied idempotency key, same body | 201, identical body, header `Idempotent-Replayed: true` |
+* | Same idempotency key, different body | 400, `{"error": "idempotency_key_reuse"}` |
+* | Insufficient funds | 422, `{"error": "insufficient_funds"}` |
+* | Unknown payer or payee UUID | 422, `{"error": "unknown_firm"}` |
+* | Payer listed as a payee | 422, `{"error": "self_payment"}` |
+* | Malformed JSON, wrong types, bad amount format, empty or oversized `payments`, bad header | 400 |
+* The same payee can appear several times. Keep separate payment rows, but aggregate the credit per payee.
+* The example of usage and outcome: 
+
+
+Pinecrest pays Nair and Lopez. It can cover the $13,251.25 total, so the service returns 201. Afterwards Pinecrest has
+$36,748.75, Lopez has $1,700.75 and Nair has $14,050.50.
+Firm Balance before Balance after
+Pinecrest CPA Group$50,000.00$
+36,748
+.75
+Lopez Bookkeeping$500.00$1,700.75
+Nair Tax Services$2,000.00$14,050.50
+{
+"payer_firm_uuid": "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41",
+"payments": [
+{
+"amount": "6250",
+"payee_firm_uuid": "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25",
+"description": "Overflow returns, August 2026"
+},
+{
+"amount": "5800.5",
+"payee_firm_uuid": "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25",
+"description": "Amended returns, August 2026"
+},
+{
+"amount": "1200.75",
+"payee_firm_uuid": "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10",
+"description": "Bookkeeping cleanup, 3 clients"
+}
+]
+}
+
+
+ for success path. 
+* Step 2 should be based of our compamy stack : Python 3.13, uv, FastAPI, Pydantic v2, SQLAlchemy 2.x, psycopg 3, Alembic, PostgreSQL, pytest + httpx (FastAPI `TestClient`), Docker, docker-compose
+
+Validate this plan if it works for described service purpose
+
+---
+
+## Assistant — 2026-11-13 17:54:42
+
+Short answer: the spec fits the purpose. The schema, the error table and the example arithmetic are right. I checked the example: 50,000.00 − (6,250 + 5,800.50 + 1,200.75) = 36,748.75, and the payee balances match.
+
+But "provably correct under concurrency" is not delivered by the schema alone. It depends on how the transaction is written, and the spec doesn't say that yet. Below is what's wrong or missing, then how I'd fix it. Nothing is scaffolded yet. I'll scaffold once you approve this, so we don't build on unsettled rules.
+
+### Problems in the spec
+
+**1. Checking the balance and then debiting it is a race.** At PostgreSQL's default isolation level, two batches from the same payer can both read $50k, both pass the check, and both debit. The `CHECK (balance_cents >= 0)` constraint catches only the final overdraw, as a 500 error rather than a 422. Partial overdraws that each pass are fine; this one isn't. The balance check has to run on a locked row.
+
+**2. Deadlocks between firms paying each other.** Your own business context says firms pay each other. If A pays B while B pays A, and each transaction locks its payer first, they deadlock. A single `UPDATE … WHERE id IN (…)` doesn't fix it either, because PostgreSQL doesn't guarantee the order it locks rows in. **Fix:** lock every firm involved with one `SELECT … WHERE id = ANY(:ids) ORDER BY id FOR UPDATE` before checking or writing anything.
+
+**3. Two requests with the same Idempotency-Key at the same time.** The spec only covers a replay after the first request has finished. With "look up the key, then insert", both requests miss the lookup and both pay. **Fix:** make the batch insert itself the gate, with `INSERT … ON CONFLICT (payer_firm_id, idempotency_key) DO NOTHING`:
+- PostgreSQL makes the second request wait until the first one commits or rolls back.
+- If the first commits, the second gets no row back. It then reads the committed batch and compares fingerprints: if they match, it replays; if not, it returns `idempotency_key_reuse`.
+- If the first rolled back (say, a 422), the second goes ahead as a fresh request.
+
+No 409 "in progress" state is needed.
+
+**4. The Idempotency-Key header is optional, and for money that's a mistake.** The schema allows a NULL key, so the header is optional. A client that times out and retries without a key pays twice. This is the main thing I'd push back on. **← your decision (below)**
+
+**5. Failed requests are not stored.** Only successes create a batch row. So a request that got a 422 and is retried with the same key after a top-up will succeed. I think that's correct and simple, but the spec should say so. Stripe, by contrast, stores error responses.
+
+**6. The order of error checks is undefined.** Several errors can apply to one request, and so can a replay. Without a fixed order, the response depends on the code path. I propose:
+1. 400: bad header or bad body.
+2. 422 `unknown_firm` for the payer. The key is scoped to the payer, so it has to be known first.
+3. Idempotency: replay, or 400 `idempotency_key_reuse`.
+4. 422 `self_payment`, then 422 `unknown_firm` for a payee.
+5. Lock the firms, then 422 `insufficient_funds`.
+
+Doing the replay before the funds check matters: if the payer has since spent its balance, a replay must still return 201, not 422.
+
+**7. Replay must return identical `payment_ids` in request order.** The documentation doesn't guarantee the order of `INSERT … RETURNING` for a multi-row insert. To keep "spec columns unchanged", I'll insert payments in request order and replay with `ORDER BY id`. If you'd accept another added column, a `position` column is more robust.
+
+**8. Validation limits are undefined.** I'll set these unless you say otherwise:
+- `amount` must be a JSON string matching `^\d{1,10}(\.\d{1,2})?$` and be greater than 0. A number, `"1."`, `"1e3"`, `"-5"`, `" 5"` or `"0.00"` returns 400. Capping at 10 integer digits keeps totals well inside BIGINT.
+- `payments` holds 1 to 1000 entries.
+- `description` is 1 to 500 characters.
+- UUIDs are parsed and stored lowercase. The firm uuids are TEXT, so an uppercase UUID would otherwise be reported as `unknown_firm`.
+
+**9. No authentication.** Anyone who knows a payer's UUID can empty its balance. That's acceptable for an exercise, but the spec should list it as an explicit non-goal, not leave it unsaid.
+
+**10. Hot rows when scaling (for later, not a v1 blocker).** A popular payee's row is locked by every batch that credits it, so throughput per payee is serialized. Adding up all credits per payee (which you already require) keeps it to one update per payee. If this becomes a bottleneck, the next step is an append-only ledger. The schema doesn't block that later.
+
+### How to make it concurrency-safe
+
+| Approach | Trade-off |
+|---|---|
+| **A. Lock rows in id order (`FOR UPDATE`), READ COMMITTED.** I recommend this. | Correctness is easy to reason about: no overdraw, no deadlock cycle, and no retry loop. The cost is that batches touching the same firm wait for each other. |
+| B. SERIALIZABLE isolation with automatic retries | Also correct, but it needs retry logic. Under load it throws serialization failures even for harmless conflicts, which is harder to prove and test. |
+| C. Append-only ledger instead of `balance_cents` | Scales best, but it changes the schema you specified and is too much for v1. |
+
+The proof of correctness is a set of concurrency tests against real Postgres in docker-compose, not SQLite:
+- Many concurrent batches drain one payer: the number that succeed equals exactly what the balance covers, and the sum of all balances stays constant.
+- A and B pay each other concurrently: no deadlock errors.
+- N concurrent requests share one key: exactly one batch row exists and every response body is identical.
+
+For step 2, the tech stack you listed fits this design. I'll use synchronous SQLAlchemy with psycopg 3. FastAPI runs synchronous endpoints in a thread pool, which keeps the transaction code simple.
+
+**Your decision:** should `Idempotency-Key` be **required** (400 if missing)? I recommend that. The other option is to keep it optional, as the nullable column suggests. Once you answer and confirm approach A along with my calls in points 5–8, I'll write the spec document and scaffold the project.
+
+---
+
+## User — 2026-11-14 09:30:32
+
+Look at this sql transaction and evaluate if it resolve problems listed before 
+
+```
+before BEGIN:
+  credits = payee_uuid -> summed cents ; total = sum(credits) ; fingerprint = sha256(canonical request)
+
+BEGIN
+  SET LOCAL lock_timeout / statement_timeout
+
+  SELECT id, uuid, balance_cents FROM firms
+    WHERE uuid IN (:payer, :payees...) ORDER BY id FOR UPDATE
+  if a firm is missing -> rollback, UnknownFirm
+
+  if idempotency key supplied:
+    SELECT id, uuid, request_fingerprint, total_cents FROM payment_batches
+      WHERE payer_firm_id = :payer_id AND idempotency_key = :key
+    if found and fingerprint differs -> rollback, IdempotencyKeyReuse
+    if found                         -> SELECT id FROM payments WHERE batch_id = :id ORDER BY id,
+                                        rollback, return Replayed(batch)
+
+  if payer.balance_cents < total -> rollback, InsufficientFunds
+
+  INSERT INTO payment_batches (...) RETURNING id
+  INSERT INTO payments (batch_id, ...) VALUES (...), (...) RETURNING id       -- one statement, rows in request order;
+                                                                              -- sort the returned ids ascending,
+                                                                              -- RETURNING order is not guaranteed
+  UPDATE firms SET balance_cents = balance_cents + :delta WHERE id = :id
+    -- payer with -total, each payee with its credit (executemany)
+COMMIT
+```
+
+And lets make idempotency key required.
+Give me feedback how this solves our requirements in general
+
+---
+
+## Assistant — 2026-11-14 09:31:29
+
+Verdict: **this transaction works, and it handles idempotency more simply than the `ON CONFLICT` version I suggested.** There are a few gaps, but they're small and fixable. With a required key and the fixes below, I'd approve it as the core of v1.
+
+`★ Insight ─────────────────────────────────────`
+- Two requests with the same key always have the same payer, so they both need the payer's row lock. The second request waits on `FOR UPDATE` until the first commits. Then its idempotency `SELECT` runs as a new statement with a fresh snapshot (the READ COMMITTED default), so it sees the committed batch and replays it. **The payer lock alone serializes idempotency.** The unique index is only a safety net.
+- In PostgreSQL, `ORDER BY id FOR UPDATE` locks rows in the sorted order (the lock step runs after the sort), so the lock order is deterministic. `id` never changes, so the documented caveat about results coming back out of order doesn't apply here.
+`─────────────────────────────────────────────────`
+
+### Against the earlier problems
+
+| # | Problem | Status |
+|---|---|---|
+| 1 | Check-then-debit race | ✅ Solved. The balance check reads the row after it's locked, and at READ COMMITTED `FOR UPDATE` returns the latest committed version. |
+| 2 | A↔B deadlock | ✅ Solved. Every firm row is locked in one statement in id order, and the later `UPDATE`s only touch rows already locked. Foreign-key checks on the inserts take `KEY SHARE` locks, which our own `FOR UPDATE` already covers. |
+| 3 | Concurrent requests with the same key | ✅ Solved by the payer lock (see the insight above). |
+| 4 | Key optional | ✅ Now required. |
+| 5 | Failed requests not stored | ✅ Behaves as intended: a 422 rolls back, so a retry is evaluated fresh. |
+| 6 | Error check order | ⚠️ Defined, but different from what I proposed (see below). |
+| 7 | `payment_ids` order | ⚠️ The replay always matches the first response. Whether `payment_ids[i]` belongs to `payments[i]` is only probably true (see below). |
+| 10 | Hot payee rows | ➖ Same as before: batches touching the same firm run one at a time. Acceptable for v1. |
+
+### Fixes needed
+
+1. **Make `payment_batches.idempotency_key` NOT NULL.** The key is required now, so the nullable column and the "NULL keys don't conflict" comment have no reason to exist. Leaving it nullable is a hole in the safety net.
+2. **Check `self_payment` before BEGIN.** It's pure validation and doesn't appear in your transaction. Keep it as a 422 to match your table.
+3. **`SET LOCAL` doesn't accept bind parameters.** psycopg 3 binds parameters on the server, so `SET LOCAL lock_timeout = %s` fails. Use `SELECT set_config('lock_timeout', %s, true)`, or inline constants you control.
+4. **The lock timeout has no response defined.** When `lock_timeout` fires (SQLSTATE `55P03`) or the statement times out (`57014`), the client currently gets a 500. I propose **503 `{"error": "busy"}` with `Retry-After`**. Retrying with the same key is safe because nothing was written. This needs adding to the spec table.
+5. **The fingerprint must cover the full normalized list, not `credits`.** Hash the payer uuid plus every entry in order (lowercased uuid, amount in cents, description). If you hash the summed-credits map, two different requests with the same per-payee totals get the same fingerprint, and the second is silently replayed as the first.
+6. **The error order changed.** In your transaction, `unknown_firm` (payer or payee) is checked before the idempotency lookup. So reusing a key with a different body that names an unknown payee returns 422 `unknown_firm`, not 400 `idempotency_key_reuse`. Both are defensible, and I'd keep yours because it's simpler. Write it into the spec so the tests assert it.
+7. **The order of `payment_ids`.** Sorting the returned ids works because PostgreSQL assigns identity values in `VALUES` order. That's how it behaves in practice, but the docs don't promise it. In SQLAlchemy 2.x, use `insert(...).returning(..., sort_by_parameter_order=True)`, which is built for exactly this. Otherwise, a `position` column makes it explicit.
+8. **Rule for other code that changes balances.** Correctness here depends on every code path that locks more than one firm doing it in id order. Code that changes a single firm's balance (for example, invoice payments landing) is safe anyway. Put the rule in the code next to the lock statement.
+
+Two minor points I'll decide on unless you object:
+- Use `FOR NO KEY UPDATE` instead of `FOR UPDATE`. It's enough for a balance change and doesn't block unrelated foreign-key inserts.
+- The header is valid if it's 1–255 characters, all ASCII 0x20–0x7E (printable characters, space included).
+
+A replay takes the same locks as a payment, so replays wait behind in-flight batches. That keeps the code to one path, and it's an acceptable cost for v1.
+
+**Next:** if you agree with fixes 1–8, I'll write the design document with this transaction as the core, get your approval, and then scaffold step 2 (FastAPI, SQLAlchemy, Alembic, docker-compose with Postgres, and pytest including the concurrency tests).
+
+---
+
+## User — 2026-11-14 09:51:27
+
+Yes reasonable points for me. I agree with fixes 1-8 and minor points too. Lets freeze this implementation for the version 1. Do following First create design doc of above frozen architecture in a format of adr in new folder docs/adr/ and be short and only main desicions puth there describe api model tables with constraints and consistency with correctnes garanties of this version 1, pros and cons. then scaffold step 2 (FastAPI, SQLAlchemy, Alembic, docker-compose with Postgres, and pytest including the simple test) without any implementation yet only health endpoint and github actions with one simple test of healthcheck api. In a next steps follow  the rule - do one small thing in a time and receive my approve or clarification then do code changes run tests and commit localy. I will review and commit to github my myself.
+
+---
+
+## Assistant — 2026-11-14 09:54:56
+
+I've written the ADR and the scaffold, in two local commits. The health test passes, and the whole stack runs in Docker: the image builds, Alembic connects to Postgres, and `curl /health` returns `{"status":"ok"}`. Nothing is pushed. The GitHub Actions workflow hasn't run yet; it will on your first push.
+
+**Commits**
+- `d657e8e` adds the decision record: [0001-bulk-payments-v1.md](docs/adr/0001-bulk-payments-v1.md). It covers the API and the order errors are checked in, the three tables with their constraints, the transaction, the six correctness guarantees, pros and cons, and what's out of scope.
+- `434ce08` adds the scaffold:
+  - [app/main.py](app/main.py) with only `/health`.
+  - [app/db.py](app/db.py) sets up the database connection but doesn't connect until first used.
+  - Alembic reads the database address from the `DATABASE_URL` environment variable instead of a hard-coded line in `alembic.ini`.
+  - [docker-compose.yml](docker-compose.yml) runs Postgres 17 and the app; the app starts only once Postgres is ready, and runs `alembic upgrade head` on startup.
+  - [ci.yml](.github/workflows/ci.yml) runs pytest.
+  - [test_health.py](tests/test_health.py) is the one test.
+
+`★ Insight ─────────────────────────────────────`
+- `/health` only confirms the process is up; it doesn't touch the database. That means CI needs no Postgres today. When the concurrency tests arrive, CI will need a Postgres service container, because those tests must run against real Postgres, not SQLite.
+- With `UV_PROJECT_ENVIRONMENT=/opt/venv`, the Docker image puts the dependencies in a fixed location, so rebuilds reuse the dependency layer unless `uv.lock` changes.
+`─────────────────────────────────────────────────`
+
+**Things to know**
+- I added `session-transcript.md` to `.gitignore` so it doesn't go to GitHub by accident. Remove that line if you want it in the repo.
+- The tests print a warning from Starlette: using `httpx` with its test client is deprecated and it recommends `httpx2`. Your stack lists `httpx`, so I kept it. Nothing breaks today, but it's a pending upgrade.
+- Docker (OrbStack) wasn't running, so I started it to check the stack.
+
+From here I'll go one small step at a time, as you asked. The first step would be an Alembic migration that creates `firms`, `payment_batches` and `payments` with every constraint from the ADR (including `idempotency_key NOT NULL`) and adds the three seed firms. The test for it applies the migration to a real Postgres and checks that the constraints reject bad rows.
+
+---
+
+## User — 2026-11-14 10:21:13
+
+Yes, migration next
+
+---
+
+## User — 2026-11-14 10:21:39
+
+(sent while the assistant was working) but create branch and change locally i will review and commit myself
+
+---
+
+## Assistant — 2026-11-14 10:22:55
+
+The migration is on branch `feat/initial-schema-migration`, uncommitted for you to review and commit. All 15 tests pass against real Postgres: 14 new ones plus the health test. From now on every step gets its own branch and I won't commit.
+
+**Changes on the branch**
+- [0001_initial_schema.py](migrations/versions/0001_initial_schema.py) creates the three tables exactly as in the ADR, including `idempotency_key NOT NULL`. Every constraint has an explicit name, such as `ck_payments_not_self` and `uq_payment_batches_payer_idempotency_key`, so error logs and later migrations can refer to them.
+- [0002_seed_firms.py](migrations/versions/0002_seed_firms.py) inserts the three firms.
+- [conftest.py](tests/conftest.py) creates a separate `payments_test` database, rebuilds it once per test run (downgrade to empty, then upgrade to latest), and rolls every test's transaction back.
+- [test_migrations.py](tests/test_migrations.py) checks:
+  - the seed rows and that a valid batch and payment are accepted;
+  - that the same key works for different payers;
+  - ten constraint violations, each of which must raise `IntegrityError`;
+  - that all migrations downgrade and upgrade again cleanly.
+- [ci.yml](.github/workflows/ci.yml) gets a Postgres 17 service container. The file parses correctly, but it hasn't run on GitHub yet.
+
+**Pushback:** you asked to seed the database, but putting demo firms in the migration chain means every environment gets them, production included. I put them in their own migration, `0002`, so they're easy to remove. The proper long-term home is a separate seed script, which I'd add once there's more than one environment.
+
+`★ Insight ─────────────────────────────────────`
+- The violation tests expect `IntegrityError` specifically, not any exception. A typo in the SQL raises `ProgrammingError`, so a broken test fails instead of passing by accident.
+- Payments IDs use `GENERATED ALWAYS AS IDENTITY`, which rejects hand-written IDs. That guards the "payment IDs follow request order" rule, which depends on the database assigning every ID.
+- `firms.id` is not an identity column on purpose: the seed inserts explicit IDs, and firms are presumably created by another part of the platform.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 10:27:28
+
+remove test test_migrations.py it is not somethink i want to keep lets keep only business logic and api tests related to project goal
+
+---
+
+## Assistant — 2026-11-14 10:27:49
+
+I deleted `tests/test_migrations.py`. The health test passes, and the branch now holds:
+- the two migrations;
+- [conftest.py](tests/conftest.py), which creates and migrates the test database. I kept it because the API and concurrency tests will need it.
+- the Postgres service added to [ci.yml](.github/workflows/ci.yml).
+
+Nothing is committed. I've also saved the rule: only business-logic and API tests from now on.
+
+One consequence: the database constraints are the safety nets behind the guarantees in the ADR. The two that matter most are `balance_cents >= 0` (no overdraft) and the unique `(payer_firm_id, idempotency_key)` (each key pays only once). Without the migration tests, nothing checks them directly anymore. The API and concurrency tests will cover the outcomes instead, for example that an overdraft attempt returns 422 and leaves every balance unchanged. If someone later drops one of those constraints by mistake, no test fails as long as the application logic is still right. You lose some defense in depth, but every test you keep is tied to the product goal.
+
+---
+
+## User — 2026-11-14 10:31:27
+
+Yes, validation next
+
+---
+
+## Assistant — 2026-11-14 10:33:09
+
+Validation is on branch `feat/request-validation`, uncommitted. One function is left for you to write: `amount_to_cents` in [app/schemas.py](app/schemas.py). To check everything around it, I ran the suite once with a throwaway reference version patched in from the scratchpad, and all 54 tests passed (53 validation tests plus the health test). With your stub still in place, 38 fail, as expected.
+
+**Changes on the branch**
+- [app/models.py](app/models.py) adds `Firm`, `PaymentBatch` and `Payment`, matching the columns in the migration. The constraints stay in the migration only. [migrations/env.py](migrations/env.py) now imports the models.
+- [app/schemas.py](app/schemas.py) adds the request models:
+  - `BulkPaymentRequest` and `PaymentIn`. The model field is `amount_cents` (an int), read from the JSON field `amount`, so nothing past validation ever sees dollars.
+  - `total_cents` as a property.
+  - `validate_idempotency_key` for the header.
+- [tests/test_validation.py](tests/test_validation.py) covers:
+  - your spec example, which parses to 1,325,125 cents;
+  - UUIDs normalized to lowercase;
+  - the 1,000-payment limit;
+  - 14 invalid bodies, plus valid and invalid amounts and keys.
+
+**Decisions I made (please confirm or object)**
+- `extra="forbid"`: unknown fields return 400. A misspelled `"ammount"` must never be quietly ignored.
+- Leading zeros are accepted: `"007"` becomes 700 cents. The ADR pattern allows them; tell me if you'd rather reject them.
+- `self_payment` is not checked here because it's a 422, not a 400. It belongs to the service step.
+
+**Your part: `amount_to_cents(amount: str) -> int`, about 5–10 lines**
+
+The docstring and tests define the exact contract. The choices that matter:
+- **No `float`.** `float("1200.75") * 100` gives `120074.99999999999`, and `int()` cuts it to 120074, so a cent disappears. Either split the string into dollars and cents and turn each into an int, or use `Decimal`. Splitting is simpler and avoids the corner cases where `Decimal` accepts input you don't want (`"NaN"`, `"1E3"`).
+- **Use `[0-9]`, not `\d`.** In Python, `\d` matches any Unicode digit, so `"١٢٣"` (Arabic-Indic digits) would pass, and `int("١٢٣")` returns 123. The test list includes this case.
+- **Use `fullmatch`, not `match`.** `match` accepts `"5 "` and `"1.234"` because it doesn't require the pattern to cover the whole string.
+- **Single-digit cents.** `"5800.5"` means 50 cents, not 5. Pad the fraction to two digits before converting.
+
+Then run:
+
+```bash
+uv run pytest tests/test_validation.py -q
+```
+
+`★ Insight ─────────────────────────────────────`
+- Pydantic wraps only `ValueError` and `AssertionError` raised in validators into `ValidationError`. Anything else, like the stub's `NotImplementedError`, escapes as an exception and would become a 500 instead of a 400. That's why the reference check matters, and why your implementation must raise `ValueError`.
+- `Annotated[int, BeforeValidator(...)]` runs before Pydantic's own int check. That's how a JSON number `300` gets rejected before Pydantic could accept it as an int.
+`─────────────────────────────────────────────────`
+
+Before the API tests (the step after this), `tests/conftest.py` and the Postgres service in CI will need to come back. Your commit on the migration branch left both out, and the API tests need a real database.
+
+---
+
+## User — 2026-11-14 10:41:03
+
+Lets adjust our workflow a bit do all like before but lets do all in one branch. rename current to feature-core-v1 and lets do all commits there . finally i will merge big PR on github by myself. Also i want to add some validation rules to the model which i want you to put to pydantic schemas (which represent API request) validation "
+- `amount`: string matching `^\d{1,9}(\.\d{1,2})?$`, value greater than zero. Converted to integer cents by string
+  splitting. No `float`, no `Decimal` field type.
+- `payee_firm_uuid`, `payer_firm_uuid`: Pydantic `UUID`; compare with the database using `str(uuid)` (canonical lowercase)"
+
+---
+
+## Assistant — 2026-11-14 10:42:29
+
+I renamed the branch to `feature-core-v1`, and your two validation rules are in the request schemas. All 55 tests pass. Nothing is committed.
+
+**First, a branch problem I found and fixed.** The branch had been created from your old local `main`, before PR #1, so it had no migrations, no `conftest.py` and no CI Postgres service. That's also why I wrongly said last time that your commit had left those out; I'm withdrawing that claim. The branch had no commits of its own, so I set the uncommitted work aside, fast-forwarded the branch to `origin/main` (which includes merged PR #1), and put the work back. Nothing was lost. Your local `main` is still behind `origin/main`; I didn't touch it.
+
+**Your rules, as implemented in [app/schemas.py](app/schemas.py)**
+- **Amount.** `amount_to_cents` now has a real body. It checks the format with your rule, using `[0-9]` instead of `\d` and requiring the pattern to match the whole string; the reason is the correction I described above. It then splits the string on the `.` and converts with plain integers: `"5800.5"` gives dollars `"5800"` and cents `"50"`, so 580,050 cents. There's no `float` or `Decimal` anywhere. The largest amount is now 999,999,999.99.
+- **UUIDs.** Both firm UUID fields were already Pydantic `UUID`. I wrote the "compare with the database only as `str(uuid)`" rule into the module docstring so the service step follows it. Nothing in this step queries the database yet.
+- **Tests.** I changed the maximum valid amount to `"999999999.99"` and added two invalid cases: `"1234567890"` (10 digits) and `"5\n"` (trailing newline).
+- **[The ADR](docs/adr/0001-bulk-payments-v1.md)** now states your amount rule (with the ASCII and whole-string note), the UUID comparison rule, and that unknown fields are rejected.
+
+`★ Insight ─────────────────────────────────────`
+- Padding the cents to two characters (`"5".ljust(2, "0")` becomes `"50"`) is what makes `"5800.5"` mean 50 cents rather than 5. The format check has already guaranteed the cents part is at most two digits, so the padding can't produce a wrong value.
+- The 9-digit limit leaves a huge margin: 1,000 payments at the maximum add up to about 10¹⁴ cents, while PostgreSQL's `BIGINT` holds about 9.2 × 10¹⁸. Summing a batch can't overflow.
+`─────────────────────────────────────────────────`
+
+One part of your new workflow isn't clear to me: "do all commits there" could mean I commit each approved step on `feature-core-v1`, or that you do. Whichever you choose, I won't push, and you'll open and merge the big PR on GitHub.
+
+---
+
+## User — 2026-11-14 10:42:37
+
+I'll commit myself
+
+---
+
+## Assistant — 2026-11-14 10:42:49
+
+Noted, and saved for future sessions too. I'll leave every step uncommitted on `feature-core-v1`. You commit, and I never push.
+
+**Proposed next step: request fingerprint and payee aggregation.** It's pure logic with no database, so it stays small:
+- `request_fingerprint(req)`: SHA-256 of canonical JSON built from the payer UUID plus every entry in order (lowercase payee UUID, amount in cents, description). The tests check that:
+  - `"300"` and `"300.00"` produce the same fingerprint;
+  - an uppercase UUID produces the same fingerprint as lowercase;
+  - reordering the entries, or changing a description, produces a different one;
+  - the fixed case from fix 5 holds: two requests with the same per-payee totals but split differently produce different fingerprints.
+- `credits_by_payee(req)`: amounts summed per payee. With your spec example, Nair gets 1,205,050 cents and Lopez 120,075.
+- `is_self_payment(req)`, for the 422 check that runs before the transaction starts.
+
+After that, the steps would be: the transaction service with database tests, then the `POST /bulk-payments` endpoint with API tests, then the concurrency tests. Shall I go ahead with the fingerprint step?
+
+---
+
+## User — 2026-11-14 10:48:25
+
+Before next step lets clean the project structure i want to see here example layout: "
+app/domain/money.py              parse_amount_to_cents(str) -> int
+app/domain/bulk_payment.py       BulkPaymentCommand, PaymentItem (frozen dataclasses), domain errors,
+app/application/pay_bulk.py      PayBulk use case: transaction, idempotency, retry
+app/infrastructure/db.py         engine, session factory
+app/infrastructure/tables.py     SQLAlchemy Core table definitions
+app/infrastructure/store.py      the SQL: lock_firms, find_batch, insert_batch, insert_payments, apply_balance_deltas,
+app/api/schemas.py               Pydantic request/response models
+app/api/routes.py                POST /bulk-payments, GET /health
+app/api/errors.py                exception handlers (400 override, domain error -> status)
+app/main.py  app/config.py
+migrations/   scripts/seed.py   tests/
+Dockerfile  docker-compose.yml  nginx.conf  Makefile  README.md
+
+Dependencies point inward only: api -> application -> domain, application -> infrastructure."
+
+---
+
+## User — 2026-11-14 10:49:32
+
+Answers to the question form:
+
+- **Your layout gives PayBulk a "retry" job, but ADR 0001 says no retry loops: locking firms in id order means no deadlocks, and a lock timeout returns 503 so the client retries safely with the same key. What should PayBulk retry?** → Drop retry (Recommended)
+- **What is nginx.conf for? v1 is a single API service, so nginx adds a moving part unless it has a job.** → Load-balance replicas
+
+---
+
+## Assistant — 2026-11-14 10:54:25
+
+The project now follows your layout on `feature-core-v1`, and none of it is committed. All 55 tests pass. Imports only point inward. I brought up the full stack from an empty database and checked it: migrations run once, the seed runs, two app replicas start, and nginx splits requests evenly between them (5 and 5 out of 10).
+
+**Layout**
+
+| Path | Contents |
+|---|---|
+| `app/domain/money.py` | `parse_amount_to_cents`, moved from the old schemas file |
+| `app/domain/bulk_payment.py` | `PaymentItem` and `BulkPaymentCommand` (frozen dataclasses, `total_cents`), plus `DomainError` with `SelfPayment`, `UnknownFirm`, `IdempotencyKeyReuse`, `InsufficientFunds`, each carrying its public error `code` |
+| `app/api/schemas.py` | The Pydantic request and response models. `BulkPaymentRequest.to_command(key)` builds the domain command, so the domain never sees dollars or `UUID` objects |
+| `app/infrastructure/tables.py` | SQLAlchemy Core tables that replace the ORM models, with the same constraint names as the migration. `alembic check` reports no difference between the two |
+| `app/infrastructure/db.py`, `app/api/routes.py`, `app/main.py` | Engine and session factory, `/health`, and the app setup that wires them together |
+| `store.py`, `pay_bulk.py`, `errors.py` | Docstrings only, describing what each will contain. I wrote no untested code for them |
+| `scripts/seed.py` | Inserts the demo firms, can be rerun safely, and reports how many it actually inserted |
+| `Makefile` | `make up`, `down`, `test`, `db`, `migrate`, `seed`, `logs` |
+| `nginx.conf` | Load-balances the app replicas |
+
+**Problems I found and fixed**
+- **nginx sent every request to one replica.** At startup it looks up `app` once and got only one address back, even though Docker's DNS returns both replicas. It now asks Docker's DNS on each lookup (`resolver 127.0.0.11` with `server app:8000 resolve`). That needs nginx 1.27.3 or later, so I pinned `nginx:1.28.0-alpine`.
+- **Two replicas would race to run migrations at startup.** Each container used to run `alembic upgrade head` before starting. Migrations and the seed now run once in a separate `migrate` job, and the replicas start only after it succeeds.
+
+**Things to know**
+- **Migration 0002 is deleted, and it was already merged to `main` in PR #1.** Any database still at revision `0002` will fail with "Can't locate revision" and needs `make down` to start over. Nothing is deployed and CI creates a fresh database each run, so it only matters for local databases. I already reset mine.
+- **About "dependencies point inward only":** `application → infrastructure` actually points outward in the usual onion picture. This is a simple layered design, not ports and adapters. That's a fine choice for v1, and the ADR now describes it as it is.
+- Your answers are recorded in the ADR: PayBulk has no retry loop, and the app runs as two replicas behind nginx. The ADR also has new "Code structure" and "Deployment" sections.
+
+`★ Insight ─────────────────────────────────────`
+- nginx with replicas makes the correctness guarantees testable across processes: two replicas can't share an in-memory lock, so all coordination must come from PostgreSQL row locks.
+- nginx doesn't resend a failed POST to the other replica by default, because POST isn't safe to repeat. Combined with the Idempotency-Key, a client retry after a 502 or 503 can never pay twice.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:05:53
+
+Yes, domain logic next
+
+---
+
+## Assistant — 2026-11-14 11:06:46
+
+The domain logic is in, uncommitted on `feature-core-v1`. All 68 tests pass, including 13 new ones, and the domain still imports nothing from FastAPI, Pydantic or SQLAlchemy.
+
+**What I added to `BulkPaymentCommand`** ([bulk_payment.py](app/domain/bulk_payment.py))
+- **`ensure_not_self_payment()`** raises `SelfPayment` if the payer is also a payee. UUIDs arrive already lowercased, so an uppercase payer UUID is still caught; a test covers this.
+- **`credits_by_payee()`** returns cents per payee. For the spec example that's Nair 1,205,050 and Lopez 120,075, which add up to the 1,325,125 total.
+- **`fingerprint()`** returns a SHA-256 of canonical JSON built from the payer and every item in order (payee, cents, description). The Idempotency-Key is left out, because it names the request rather than describing its content.
+
+**Tests** ([test_bulk_payment.py](tests/test_bulk_payment.py)). The fingerprint is the same for `"300"` and `"300.00"`, for upper- and lowercase UUIDs, and for different keys. It differs when the items are reordered, a description changes, the payer changes, or the same per-payee totals are split differently.
+
+**Checking that the tests catch the wrong design.** I temporarily replaced `fingerprint()` with the version fix 5 rejected (a hash of only the per-payee credits). Four tests failed, including the "same totals, split differently" case, so a regression to that design would be caught. The swap ran from a scratchpad file; nothing in the project changed.
+
+`★ Insight ─────────────────────────────────────`
+- Each item is hashed as a JSON array, not as joined strings. Joining `"a,b"` + `"c"` and `"a"` + `"b,c"` would give the same text. JSON escaping keeps field boundaries unambiguous, and `test_fingerprint_does_not_confuse_field_boundaries` checks that.
+- The fingerprint works on the domain command, after cents conversion and UUID normalization. That's why "300" and "300.00" match without any special handling: the canonical form is decided once, at the API boundary.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:15:16
+
+Yes, store next
+
+---
+
+## Assistant — 2026-11-14 11:16:39
+
+The store is done, uncommitted on `feature-core-v1`. All 74 tests pass against real Postgres, including 6 new store tests.
+
+**[store.py](app/infrastructure/store.py)**
+
+| Function | What it does |
+|---|---|
+| `set_local_timeouts` | Sets `set_config('lock_timeout' / 'statement_timeout', …, true)` for the current transaction only (fix 3: `SET LOCAL` can't take bind parameters) |
+| `lock_firms` | One `SELECT … ORDER BY id FOR NO KEY UPDATE`. I checked the compiled SQL. Unknown UUIDs are simply missing from the result, and the use case will turn that into `UnknownFirm` |
+| `find_batch` | Finds the batch for a payer and key, with `payment_ids` sorted by id, for replays |
+| `insert_batch`, `insert_payments` | Payment ids come back in request order |
+| `apply_balance_deltas` | One `UPDATE … balance_cents = balance_cents + :delta` per firm, sent as a single batch |
+
+It takes plain values in and returns small dataclasses, so it imports nothing from the domain or the API. The caller owns BEGIN, COMMIT and ROLLBACK.
+
+**Tests ([test_store.py](tests/test_store.py))**
+- **Lock blocking:** two real connections. One holds Nair's row, and the other times out after 200 ms with SQLSTATE `55P03`. That's the error the API will turn into 503 `busy`.
+- **Spec example at the SQL level:** after the writes, the balances are exactly $36,748.75, $1,700.75 and $14,050.50. `payment_ids[i]` really is the row for `items[i]`, and `find_batch` returns the same ids for a replay.
+- A batch lookup with the same key but a different payer finds nothing.
+- An overdraft that gets past the application is stopped by the database's `CHECK` constraint.
+
+**The SQL SQLAlchemy generates for `insert_payments`.** I logged it to check fix 7. It's a single statement, not one insert per row:
+```sql
+INSERT INTO payments (...) SELECT ... FROM (VALUES (..., 0), (..., 1), ...) AS imp_sen(..., sen_counter)
+ORDER BY sen_counter RETURNING payments.id
+```
+SQLAlchemy numbers the rows and adds `ORDER BY sen_counter`, so PostgreSQL inserts them, and assigns their ids, in request order.
+
+`★ Insight ─────────────────────────────────────`
+- `with_for_update(key_share=True)` is SQLAlchemy's spelling of `FOR NO KEY UPDATE`; the name reads as if it does the opposite. It allows concurrent `FOR KEY SHARE` locks, which are what PostgreSQL's foreign-key checks take. So inserting a payment that references a firm locked by another batch doesn't wait on that lock.
+- The lock test reads `exc.value.orig.sqlstate`, the five-character PostgreSQL error code, not the message text. The API error handler should check that code too: messages change between versions and languages, codes don't.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:29:40
+
+Yes, PayBulk next
+
+---
+
+## Assistant — 2026-11-14 11:31:14
+
+PayBulk is in, uncommitted on `feature-core-v1`. All 87 tests pass against real Postgres, including 13 new business tests. They also pass when the PayBulk tests run before the store tests, so committed rows don't leak between tests.
+
+**[pay_bulk.py](app/application/pay_bulk.py)** follows the transaction in the ADR step by step:
+1. **Before BEGIN:** checks for self-payment, then computes the per-payee credits, the total and the fingerprint. No locks are held yet.
+2. **Inside `engine.begin()`:** this commits on normal exit and rolls back on any exception, so every rejection writes nothing. The steps are:
+   - set the timeouts and lock all firms;
+   - raise `UnknownFirm` if fewer rows come back than UUIDs were asked for;
+   - look up the batch for this key: replay it, or raise `IdempotencyKeyReuse` if the fingerprint differs;
+   - raise `InsufficientFunds`, or insert the batch and payments and update the balances.
+3. **Timeouts:** SQLSTATE `55P03` or `57014` becomes `ServiceBusy`. Any other database error is re-raised as is, so a real bug surfaces as a 500 instead of being hidden as "busy".
+
+`ServiceBusy` lives in the application layer, not the domain, because a timeout is a property of the infrastructure, not a business rule. The batch UUID generator is injectable, so tests can make it deterministic later.
+
+**Tests ([test_pay_bulk.py](tests/test_pay_bulk.py))**, each about one business rule:
+- The spec example produces exactly the spec balances. A payer can spend its exact balance down to 0.
+- **A replay doesn't pay twice:** same result, `replayed=True`, balances unchanged, still 1 batch and 3 payments.
+- **A replay still succeeds after the payer has spent everything.** This proves the idempotency check runs before the funds check.
+- A rejected request leaves no trace: a 422, then a top-up, then a retry with the same key succeeds.
+- Error cases: key reuse with a different body, insufficient funds (one cent over), unknown payer or payee, self-payment. Each also checks that nothing was written.
+- The documented order holds: `unknown_firm` wins over `idempotency_key_reuse`.
+- Another transaction holding Nair's row makes PayBulk raise `ServiceBusy` within 100 ms, and nothing is written.
+
+**One test-design point:** PayBulk commits for real, so these tests can't use the roll-back-everything `db` fixture. The new `clean_engine` fixture empties the tables and reseeds before and after each test. That's slower than rolling back, but it's the only way to test what actually gets committed.
+
+`★ Insight ─────────────────────────────────────`
+- The replay path returns from inside `with engine.begin()`, so it commits a transaction that only read data. That releases the row locks just as a rollback would, and it keeps a single exit path instead of a special case.
+- `{payer.id: -total} | {payee_id: credit, …}` builds the balance changes in one expression. It's correct only because self-payment was rejected first; otherwise the payer's debit and credit would share a key and one would overwrite the other. The comment in the code records that dependency.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:42:16
+
+Yes, endpoint next
+
+---
+
+## Assistant — 2026-11-14 11:44:03
+
+The `POST /bulk-payments` endpoint works, uncommitted on `feature-core-v1`. All 107 tests pass, including 20 new API tests.
+
+**Changes**
+- **[errors.py](app/api/errors.py)** maps errors to responses:
+  - request validation errors return 400 `invalid_request` instead of FastAPI's default 422;
+  - a bad or missing `Idempotency-Key` returns 400 `invalid_idempotency_key`;
+  - `DomainError` returns 400 for key reuse and 422 for everything else, with body `{"error": code}`;
+  - `ServiceBusy` returns 503 `busy` with `Retry-After: 1`.
+- **[routes.py](app/api/routes.py)**: the endpoint is a plain synchronous function, so FastAPI runs it in a worker thread. It returns 201, and adds `Idempotent-Replayed: true` when the request was a replay.
+- **[main.py](app/main.py)**: `create_app(pay_bulk=None)` is now the only place that connects the database engine to the API. Tests pass in a `PayBulk` that uses the test database, and the API layer still imports nothing from infrastructure; I checked.
+- **[The ADR](docs/adr/0001-bulk-payments-v1.md)** now gives the two 400 response bodies, which it previously left undefined.
+
+**Tests ([test_api.py](tests/test_api.py)) cover every row of the spec's response table:**
+- The spec example returns 201 and moves the money.
+- A replay returns a byte-identical body plus the replayed header, even when the amount and UUIDs are spelled differently (`"300.00"`, uppercase).
+- Reusing a key with a different body returns 400.
+- Insufficient funds, unknown payer or payee, and self-payment each return 422 and write nothing.
+- Seven invalid bodies and malformed JSON return 400, as do a missing, empty or too-long key.
+- A held lock returns 503 with `Retry-After`, and the client's retry with the same key then succeeds.
+
+**End to end through nginx:** both POSTs returned 201 with the same `batch_uuid` and `payment_ids [1,2,3]`, and the balances in Postgres match the spec exactly. The first request and the replay landed on different replicas, so the replay was served by a process that never saw the original. That's possible because all idempotency state lives in the database.
+
+`★ Insight ─────────────────────────────────────`
+- A malformed JSON body never reaches the endpoint: FastAPI reports it as a `RequestValidationError`, so the one 400 override covers both bad JSON and schema errors. That's why `test_malformed_json_returns_400` needed no extra code.
+- The header is validated inside the endpoint, not by FastAPI's own header checks, so a bad key gets its own `invalid_idempotency_key` code instead of being mixed into body errors. A client can then tell "fix the key" apart from "fix the body".
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:46:40
+
+Yes, concurrency next
+
+---
+
+## Assistant — 2026-11-14 11:49:54
+
+The concurrency tests are in [test_concurrency.py](tests/test_concurrency.py), staged but not committed; I see you've already committed the endpoint step. All 112 tests pass, and the concurrency suite passed 30 runs in a row.
+
+**What the tests prove** (20 simultaneous transactions each, on separate connections, started together by a barrier)
+
+| Guarantee | Scenario | Result |
+|---|---|---|
+| No overdraft | Lopez has $500.00; 20 batches of $70.00 race for it | Exactly 7 succeed, 13 get `InsufficientFunds`, Lopez ends at $10.00 |
+| No deadlock | Every pair of firms paying each other in both directions, plus 3-way cycles in one batch | No errors; final balances equal the sum of all debits and credits |
+| Exactly once per key | 20 identical requests with the same key | One applies, 19 replay the identical result; 1 batch, 2 payments, payer debited once |
+| Key contest | 10 requests with body A and 10 with body B, all with the same key | One body wins; its 10 requests succeed and the other 10 get `IdempotencyKeyReuse` |
+| Conservation | 20 random batches between the three firms (fixed random seed, so runs are repeatable) | Only `InsufficientFunds` failures; the total of all balances is unchanged and none is negative |
+
+**Proof that the tests can fail.** I swapped in two broken versions of `lock_firms` from the scratchpad:
+- **Locking one firm at a time in request order:** PostgreSQL reported real `DeadlockDetected` errors, and 2 tests failed.
+- **No locking at all:** 4 of 5 tests failed (overdraft, double payment for one key, and deadlocks).
+
+So passing these tests depends on the ordered-lock design, not on luck. One honest gap: the "key contest" test still passed with no locking. Its guarantee is also covered by the exactly-once test, which did fail.
+
+**Limits of what this covers.** The tests run threads in one process against a real Postgres. To the database that looks the same as separate replicas, which is why I didn't run the two-replica nginx setup under load. A load test through nginx (for example, many curl or k6 requests with shared keys) would add confidence in the HTTP layer, but not in the locking.
+
+`★ Insight ─────────────────────────────────────`
+- The "no locking" version deadlocked in the UPDATEs, not the SELECT. `apply_balance_deltas` updates firms in the order the Python dict lists them, and each UPDATE takes a row lock as it goes. With unordered UPDATEs, even a design without explicit locks deadlocks. That's why the ADR locks every firm up front in id order before any write.
+- The test engine uses `pool_size=THREADS, max_overflow=0` on purpose. With the default pool of 5 connections, 15 threads would wait for a free connection instead of a row lock, and the tests would mostly measure the pool.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:50:33
+
+Yes, final review
+
+---
+
+## Assistant — 2026-11-14 11:52:03
+
+v1 matches the ADR, and everything passes in a run that mirrors CI: the lockfile is consistent, `uv sync --frozen` works, all 112 tests pass against a fresh database, and the Docker image builds. The review found one real bug that I'd fix before your PR, plus a few smaller items.
+
+### Bug: a full connection pool returns 500, not 503
+
+Each replica has 15 database connections (SQLAlchemy's default of 5 plus 10 overflow), but Starlette runs up to 40 requests at once. When requests wait on a busy firm's lock, every connection can end up taken. The next request then waits up to **30 seconds** (SQLAlchemy's default `pool_timeout`) and fails with `sqlalchemy.exc.TimeoutError`. Nothing maps that error, so the client gets a **500**. I reproduced this with a tiny pool: one held connection, and `POST /bulk-payments` returned `500 Internal Server Error`.
+
+That breaks the ADR's promise that being busy means 503 and a safe retry. It also hits exactly in the hot-firm case the ADR lists as a known weakness.
+
+**Proposed fix (one small step):**
+- Set `pool_timeout` to about 2 s, in line with `lock_timeout`.
+- Size the pool to match the thread pool.
+- Treat `TimeoutError` as `ServiceBusy`.
+- Add one test, the scratch reproduction made permanent.
+
+### Smaller items (no change unless you want one)
+1. **Commit messages:** `aa2fbaa` and `11fff41` have the same message. The second one is actually the endpoint step. Worth rewording, or squashing when you merge.
+2. **`invalid_request` details include the input.** For an oversized request, the 400 body includes the whole 1,001-entry list. Removing the `input` field from each error would keep error bodies small.
+3. **`/health` doesn't check the database.** A replica stays "healthy" while Postgres is down. That's acceptable for v1 (it's a liveness check), but it's worth knowing.
+4. **Timeouts are fixed in code** (2 s lock, 5 s statement). They aren't read from environment variables yet.
+5. **Starlette warns that `httpx` is deprecated with its test client.** Still pending since the scaffold; nothing breaks.
+6. **CI doesn't build the Docker image,** so a broken Dockerfile would only show up at `make up`.
+
+### Changes from this review (uncommitted)
+- **[ADR](docs/adr/0001-bulk-payments-v1.md):** the replay path is now described as a read-only COMMIT, which is what the code does, not a ROLLBACK. The "verified by" paragraph now lists the actual concurrency scenarios and notes that versions with unordered or missing locks fail them.
+- **[README](README.md):** a `curl` example with the spec request and its expected response.
+- `tests/test_concurrency.py` from the previous step is still staged.
+
+`★ Insight ─────────────────────────────────────`
+- A system can make 503 promises at several layers: row locks (`lock_timeout`), query time (`statement_timeout`) and connection checkout (`pool_timeout`). v1 kept the first two and missed the third. The first two are database settings, while the third is a client-side setting in SQLAlchemy, which is why it was easy to overlook.
+- Making `pool_timeout` match `lock_timeout` gives clients one consistent bound: a request either gets its answer, or a 503 within about 2 seconds, and then retries with the same key.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 11:54:03
+
+Yes, fix it
+
+---
+
+## Assistant — 2026-11-14 11:55:14
+
+The pool-exhaustion bug is fixed, uncommitted on `feature-core-v1`. When no database connection is free, a request now gets **503 `busy` within about 2 seconds**, instead of a 500 after 30 seconds. All 113 tests pass. I also ran the new test once with the fix switched off, and it failed with `assert 500 == 503`, so it guards against this coming back.
+
+**Changes**
+- **[config.py](app/config.py):** two new environment settings, `DB_POOL_SIZE` (default 20) and `DB_POOL_TIMEOUT_SECONDS` (default 2).
+- **[db.py](app/infrastructure/db.py):** the engine now uses a fixed pool with `max_overflow=0` and that 2-second wait for a free connection.
+- **[pay_bulk.py](app/application/pay_bulk.py):** SQLAlchemy's pool `TimeoutError` now becomes `ServiceBusy`, just like lock and statement timeouts.
+- **[test_api.py](tests/test_api.py):** one new test. With a one-connection pool and that connection held, the request gets 503 with `Retry-After`; once the connection is released, the retry with the same key gets 201.
+- **[The ADR](docs/adr/0001-bulk-payments-v1.md):** the 503 row now includes pool timeouts, and the Deployment section explains the pool size and its limit.
+
+**Why 20 connections and not 40:** Starlette runs up to 40 requests per replica, but all replicas share Postgres's limit of 100 connections. Two replicas with 40 each would use 80, so a third replica would exceed the limit. With 20 each, you can scale to 4 replicas. Requests beyond 20 per replica wait at most 2 seconds and then get 503, which tells the client to retry later. That's the honest answer under load.
+
+`★ Insight ─────────────────────────────────────`
+- `max_overflow=0` makes the pool size a hard limit. With overflow, the real number of connections can exceed what you planned for, and the Postgres connection budget gets broken exactly when traffic peaks.
+- SQLAlchemy's `TimeoutError` is not a subclass of `OperationalError`: it's raised by the pool before a database connection exists, so there's no SQLSTATE code to check. That's why it needs its own `except` clause rather than another entry in `BUSY_SQLSTATES`.
+`─────────────────────────────────────────────────`
+
+Everything left on the branch is uncommitted for you: this fix, the README and ADR updates from the review, and the staged `tests/test_concurrency.py`. Once you've committed, the branch is ready for your PR. The other review items (the duplicate commit message, input echoed in 400 bodies, `/health` not checking the database, the `httpx` warning, CI not building the Docker image) are still open. Tell me if you want any of them as a next step.
+
+---
+
+## User — 2026-11-14 11:59:36
+
+God lets fix it as a first iteration. I want extra build ci changes. introduce the  tool to uv ruff and mypy to check coverage and typechecks of the code. also introduce types missing. I want to add the rule to add types in code which reduces errors in runtime.
+
+---
+
+## Assistant — 2026-11-14 12:04:22
+
+The tooling step is done, uncommitted on `feature-core-v1`. Locally, `make check` passes end to end: ruff lint and formatting, strict mypy, and all 113 tests at 97% coverage. GitHub CI hasn't run the new jobs yet.
+
+**Tools** (added to the dev dependencies in [pyproject.toml](pyproject.toml))
+- **ruff:** lint rules for likely bugs, modern syntax, import order, pytest style, and `ANN` (every parameter and return value must be annotated), plus the formatter.
+- **mypy `--strict`** with the pydantic plugin, over `app`, `scripts`, `migrations` and `tests`.
+- **pytest-cov** with branch coverage and `fail_under = 95`.
+
+On "coverage": ruff and mypy don't measure test coverage, so I added pytest-cov for that. If you meant type coverage, strict mypy already provides it, since every function must be fully typed.
+
+**CI ([ci.yml](.github/workflows/ci.yml)) now has three jobs that run in parallel**
+
+| Job | What it runs |
+|---|---|
+| `lint` | `ruff check`, `ruff format --check`, `mypy`. Needs no database, so it fails fast |
+| `test` | pytest with coverage against the Postgres service, failing below 95% |
+| `build` | `docker build`, so a broken Dockerfile is caught before `make up` |
+
+The [Makefile](Makefile) has matching targets: `make fmt`, `make lint`, `make typecheck`, `make cov`, and `make check` to run everything CI runs.
+
+**Type fixes that matter at runtime** (the rest were annotations in tests)
+- **Error handlers ([errors.py](app/api/errors.py)):** Starlette types every handler as taking any `Exception`. Instead of hiding that with `cast`, a small checked `_expect()` narrows to the registered type, so a handler registered for the wrong exception fails with a clear `TypeError` instead of a confusing `AttributeError` later.
+- **`get_pay_bulk` ([routes.py](app/api/routes.py)):** `app.state` is untyped, so it now verifies it really holds a `PayBulk` instead of trusting it.
+- **Amount parsing ([schemas.py](app/api/schemas.py)):** the amount validator takes `object` instead of `Any`, so mypy forces the `isinstance` check before any use.
+- **Tests:** the lock-timeout test now checks the exception type (`LockNotAvailable`) instead of reading an untyped `.sqlstate` attribute. Row counts use `scalar_one()`, which returns `int`, instead of `scalar()`, which can return `None`.
+
+**The rule ([CLAUDE.md](CLAUDE.md))**
+- Annotate every function.
+- No `Any`: use `object` and narrow with `isinstance`.
+- Narrow untyped boundaries where they enter, preferring checks over `cast`.
+- Give generic containers their element types.
+- Money is `int` cents.
+- Run `make check` before handing over.
+
+I tried a deliberately unannotated function: ruff rejected it twice (`ANN001`, `ANN202`) and mypy once (`no-untyped-def`).
+
+**Decisions you might want to revisit**
+- **I turned off ruff's N818,** which wants exception names to end in `Error`. `InsufficientFunds` reads as a business fact, and renaming would touch every layer. Say if you'd rather follow the convention.
+- **The formatter changed 10 files,** among them the generated migration and `env.py`. The changes are layout only, but they make this diff bigger than the logic changes behind it.
+- **`.coverage` was added to `.gitignore`.**
+
+`★ Insight ─────────────────────────────────────`
+- Most mypy errors pointed at real untyped boundaries rather than style: SQLAlchemy Core columns come back as `Any`, `app.state` is `Any`, and `scalar()` can return `None`. Strict mode makes each boundary explicit, and checking at the boundary keeps the rest of the code fully typed.
+- The PEP 695 generics (`def of_type[T](…) -> list[T]`, `def _expect[E: Exception](…)`) need Python 3.12 or later. They let `of_type(outcomes, InsufficientFunds)` return a `list[InsufficientFunds]` without casts. `ruff`'s `UP` rules keep this modern syntax consistent.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 12:15:49
+
+1) As human reviewd i want you to check encapsulation of modules first and propose to hide classes and functions from expose if they are intended to be used inside module only. Idea to expose minimum as possible
+
+---
+
+## Assistant — 2026-11-14 12:16:57
+
+I checked every top-level name in `app/` and `scripts/` against who actually imports it, using an `ast` scan and then confirming each candidate by hand. Nothing is changed yet.
+
+### Proposal
+
+**A. Make private (leading `_`).** Each of these is used only inside its own module.
+
+| Module | Name |
+|---|---|
+| `api/errors.py` | `RETRY_AFTER_SECONDS`, `DOMAIN_ERROR_STATUS` |
+| `api/routes.py` | `get_pay_bulk` (a FastAPI dependency, only referenced by `Depends(...)` in the same file) |
+| `api/schemas.py` | `MAX_DESCRIPTION_LENGTH`, `IDEMPOTENCY_KEY_RE`, `Cents` |
+| `application/pay_bulk.py` | `BUSY_SQLSTATES` |
+| `domain/money.py` | `AMOUNT_RE` |
+| `config.py` | `DEFAULT_DATABASE_URL` |
+| `scripts/seed.py` | `SEED_FIRMS` |
+
+No test uses any of these, so no test changes are needed.
+
+**B. Delete dead code.** Hiding unused code isn't enough; it should go.
+- `SessionLocal` in `infrastructure/db.py`: the ORM session factory, unused since we switched to Core connections.
+- `ErrorResponse` in `api/schemas.py`: defined but never used. See note 2 below for an alternative.
+
+**C. Keep public.** Each of these is a real contract used by another module.
+- **Domain** (`BulkPaymentCommand`, `PaymentItem`, the errors) and **`parse_amount_to_cents`:** used by both the API and application layers.
+- **`PayBulk`, `PayBulkResult`, `ServiceBusy`:** the use case's interface for the API.
+- **Store functions plus `NewPayment`, `LockedFirm`, `StoredBatch`:** the last two are only ever returned, never constructed elsewhere. They're part of the signatures of public functions, and returning a private type from a public function is a contradiction.
+- **Tables and `metadata`:** used by the store, migrations, seed and tests.
+- **`router`, `register_error_handlers`, `InvalidIdempotencyKey`, `validate_idempotency_key`, `create_app`, `app`, `engine`, `seed`, the `config` functions:** all imported somewhere else.
+- **`MAX_PAYMENTS`:** the boundary test uses it.
+
+**D. Intentionally not renamed, because the name is visible in the public API.**
+- **Route handlers `health` and `create_bulk_payment`:** nothing imports them, but FastAPI builds the OpenAPI `operationId` from the function name (`create_bulk_payment_bulk_payments_post`). An underscore would change what generated API clients see.
+- **`PaymentIn`:** it's the type of `BulkPaymentRequest.payments` and appears as a named schema in OpenAPI.
+
+**E. Enforce it.** Turn on ruff's `PLC2701` (import-private-name), which flags `from x import _y` across modules. It's a preview rule, so I'd enable just that one with `explicit-preview-rules = true` rather than all preview rules. Then CI keeps private names private.
+
+### Two related findings
+1. **Layer boundaries are already respected.** `api` imports nothing from `infrastructure`, and `domain` imports nothing from the other layers. Only `main.py` connects them. A tool like import-linter could enforce this in CI, but at this size the review plus CLAUDE.md is enough.
+2. **The OpenAPI docs misdescribe the errors.** They advertise a 422 `HTTPValidationError` for invalid requests, but we return 400 `{"error": "invalid_request", ...}`, and the 400/422/503 business errors aren't documented at all. So instead of deleting `ErrorResponse`, a later small step could use it to document the real responses. I've kept that out of this step because it adds behavior instead of reducing exposure.
+
+`★ Insight ─────────────────────────────────────`
+- In Python, a leading underscore is a convention, not access control: nothing stops `from x import _y`. It only becomes a real boundary when a tool enforces it, which is why item E matters.
+- With FastAPI, a function's name can be part of the public API: route handler names become `operationId`s and model class names become OpenAPI schema names. When deciding what to hide, "what other code imports this" isn't the only question; "where does this name appear outside the code" is the other.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 12:17:10
+
+Yes, apply all
+
+---
+
+## Assistant — 2026-11-14 12:18:36
+
+The encapsulation changes are applied, uncommitted on `feature-core-v1`. `make check` passes: ruff, formatting, strict mypy, and 113 tests at 96.7% coverage. One part didn't work as I proposed: the ruff rule can't enforce privacy between modules inside `app/`. Details are at the end.
+
+**Applied**
+- **10 names are now private, each renamed only inside its own module:**
+  - `_RETRY_AFTER_SECONDS` and `_DOMAIN_ERROR_STATUS` in `errors.py`
+  - `_get_pay_bulk` in `routes.py`
+  - `_MAX_DESCRIPTION_LENGTH`, `_IDEMPOTENCY_KEY_RE` and `_Cents` in `schemas.py`
+  - `_BUSY_SQLSTATES` in `pay_bulk.py`
+  - `_AMOUNT_RE` in `money.py`
+  - `_DEFAULT_DATABASE_URL` in `config.py`
+  - `_SEED_FIRMS` in `seed.py`
+
+  No test needed changing, which confirms nothing outside depended on them.
+- **2 unused items deleted:** `SessionLocal` (and its now-unused `sessionmaker` import) and `ErrorResponse`.
+- **[CLAUDE.md](CLAUDE.md)** has a new "Encapsulation rule" section:
+  - expose as little as possible;
+  - prefix anything module-only with an underscore;
+  - keep names that appear in the public API (OpenAPI operation ids and schema names);
+  - never import another module's `_name`.
+
+**Where my proposal was wrong: `PLC2701` covers less than I said.** I ran deliberate violations against it:
+
+| Private import | Flagged? |
+|---|---|
+| `app/` importing `_SEED_FIRMS` from `scripts.seed` | ✅ yes |
+| `app.api` importing `_AMOUNT_RE` from `app.domain.money` | ❌ no |
+
+The rule treats a whole top-level package as one unit, so inside `app/` it never fires, and its documentation doesn't mention this. I kept it on because it does block `tests/`, `scripts/` and `migrations/` from depending on `app` internals, which is the most common way that leaks in. I also rewrote the comment in [pyproject.toml](pyproject.toml) and the CLAUDE.md rule to say exactly what is and isn't enforced.
+
+For imports between modules inside `app/`, privacy currently relies on review plus CLAUDE.md. If you want CI to enforce that too, the options are:
+- a small `ast`-based check script, about 30 lines, in the style of the scan I used for this review;
+- a dependency tool such as import-linter, which would also enforce the layer directions.
+
+I've added neither, since you asked to keep exposure minimal and not to grow the tooling without a decision.
+
+`★ Insight ─────────────────────────────────────`
+- Probing a lint rule with a deliberate violation is the same idea as the mutation checks on the tests: a rule that is "on" but never fires gives false confidence. The first probe passed silently, and only a second probe across a package boundary showed what the rule actually checks.
+- Making `_Cents` private changed nothing in the API, even though it's the annotation on `PaymentIn.amount_cents`. Pydantic resolves the annotation at class creation, and OpenAPI only shows the field (`amount`) and its type, not the alias's name. So hiding it is safe, unlike renaming `PaymentIn` itself.
+`─────────────────────────────────────────────────`
+
+---
+
+## User — 2026-11-14 12:21:41
+
+copy session data as my questions and answers only without internal script etc
+
+---
+
+## Assistant — 2026-11-14 12:21:56
+
+An older, shorter transcript from an earlier attempt already lives in `session-transcript.md`, so I'll write this session to a new file instead of overwriting it.
+
+---
+
+## User — 2026-11-14 12:22:47
+
+owerwrite yes with timestamps
+
+---
+
+## Assistant — 2026-11-14 12:24:20
+
+I've overwritten [session-transcript.md](session-transcript.md) with the whole session, from 13 Nov 17:06 to 14 Nov 12:21. Each entry has a timestamp in your local time (CET).
+
+**What it contains**
+- **All 23 of your messages, verbatim:** the pasted spec, schema and example are included without the paste markers. That count also covers the "create branch and change locally…" message you sent while I was working (14 Nov 10:21:39) and your two answers to my question about retry and nginx.
+- **My final answer to each message, 20 in total.** My answers' headings are pushed down one level so they don't clash with the entry headings.
+- **Left out:** tool calls, scripts, command output, my progress lines between steps, system reminders, and the `/model` switch.
+
+**Where the timestamps come from.** I didn't reconstruct them: they're read from Claude Code's own log of this session, so they're the real send times. A second, older log contains one message from an abandoned branch of the conversation ("add session transcript md file…"). It isn't part of this conversation, so it's not in the file.
+
+**Two things to know**
+- The transcript ends with your "copy session data…" request, plus a short note that the file itself is the answer to it. This last exchange about overwriting isn't included, since it's about producing the file itself.
+- The file is in `.gitignore`, so it won't be committed unless you remove that line or add it with `git add -f`.
+
+---
+
+## User — 2026-11-14 12:38:06
+
+Ok last thing I want to create README which more sound. Also in readme Highlight introduced arch desicions by me (extra table, bactch id and idempotency). Also draw simple ascii high level design of a service change localy and i will review In spec was said "Write it as if you were opening a pull request for your teammates to review. Cover: your solution and the approach you
+took, the issues you ran into, the assumptions you made, possible improvements, and how to run and verify it." And future improvements One - I wish to see in future the webhook propagation from service my idea (is to add new event_table for insert event in the same transaction batch transaction outbox when transaction succesfull we can rely on CDC events from it in downstream services and publish webhooks)
+
+---
+
+## Assistant — 2026-11-14 12:41:39
+
+I rewrote [README.md](README.md) as the pull-request description your spec asks for, and changed one line in the [Makefile](Makefile). Both are uncommitted for your review. I ran the README's run-and-verify steps exactly as written:
+- The first call returned `201` with `total_cents: 1325125`.
+- The replay returned the same body with `Idempotent-Replayed: true`, served by the other replica.
+- The balances in the database match the spec exactly.
+- `make check` passes: 113 tests, 96.7% coverage.
+
+**What the README covers**
+
+| Spec requirement | Section |
+|---|---|
+| Solution and approach | The endpoint, a condensed response table, the transaction in pseudo-code, why lock order gives no overdraft, no deadlock and exactly-once, and the code layers |
+| Your architecture decisions | A section of its own, "Architecture decisions beyond the spec": **1.** the `payment_batches` table, **2.** `payments.batch_id`, **3.** the required `Idempotency-Key` with the request fingerprint, scoped per payer, recording only successes |
+| High-level design | ASCII diagram: clients → nginx → stateless replicas (api → PayBulk → store, pool) → PostgreSQL tables, plus the one-off migrate job |
+| Issues we ran into | 12 problems, each with what would have gone wrong and how it was resolved, ending with the note that the concurrency fixes are proven by tests that fail without them |
+| Assumptions | Amount rules, list limits, the order errors are checked in, no-trace rejections, firms created elsewhere, no authentication |
+| Possible improvements | **Your webhook outbox first,** with its own diagram, then 7 more by priority, authentication at the top |
+| Run and verify | `make up`, the curl call and its replay, a balance query, `make check`, a table of what each test suite proves, and the three CI jobs |
+
+**Your outbox idea in the README.** It's presented as you described it: an `outbox_events` insert in the same transaction, then CDC, a firm-keyed topic, and a webhook publisher. I added what it doesn't solve by itself:
+- delivery is at least once, so each event needs a stable `event_id` that also serves as the webhook's idempotency key;
+- per-firm ordering needs the topic partitioned by firm id;
+- an unconsumed replication slot can fill the disk;
+- the table grows, which `pg_logical_emit_message()` would avoid;
+- payees need their own `payment.received` events.
+
+**Fix found while checking the README.** `make up` returned as soon as nginx had started, not when it was ready, so following the README literally could hit the service too early. It now runs `docker compose up -d --build --wait`. I checked that this treats the one-off migrate job, which exits with code 0, as success.
+
+**Things to know**
+- **Voice:** the "Architecture decisions beyond the spec" section is written in the first person ("I added the following…"), since the decisions are yours and it's your PR. The rest uses "we" and neutral wording.
+- **Your last commit, `6493009 Add sesstion transcript`, has a typo** ("sesstion"). Since you'll merge one big PR anyway, you could fix it when you squash.
+
+---
