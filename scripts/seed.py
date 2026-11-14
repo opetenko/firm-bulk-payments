@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.infrastructure.db import engine
 from app.infrastructure.tables import firms
 
-SEED_FIRMS = [
+_SEED_FIRMS = [
     {
         "id": 1,
         "name": "Pinecrest CPA Group",
@@ -39,7 +39,7 @@ def seed(conn: Connection) -> int:
     """
     inserted = conn.execute(
         insert(firms)
-        .values(SEED_FIRMS)
+        .values(_SEED_FIRMS)
         .on_conflict_do_nothing(index_elements=["id"])
         .returning(firms.c.id)
     )
@@ -49,4 +49,4 @@ def seed(conn: Connection) -> int:
 if __name__ == "__main__":
     with engine.begin() as conn:
         inserted = seed(conn)
-    print(f"seed: {inserted} firms inserted, {len(SEED_FIRMS) - inserted} already present")
+    print(f"seed: {inserted} firms inserted, {len(_SEED_FIRMS) - inserted} already present")

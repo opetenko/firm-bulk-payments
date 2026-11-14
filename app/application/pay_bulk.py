@@ -24,7 +24,7 @@ from app.infrastructure import store
 from app.infrastructure.store import NewPayment
 
 # lock_not_available (lock_timeout), query_canceled (statement_timeout)
-BUSY_SQLSTATES = frozenset({"55P03", "57014"})
+_BUSY_SQLSTATES = frozenset({"55P03", "57014"})
 
 
 class ServiceBusy(Exception):
@@ -125,7 +125,7 @@ class PayBulk:
         except PoolTimeoutError as exc:  # no free connection within pool_timeout
             raise ServiceBusy() from exc
         except OperationalError as exc:
-            if getattr(exc.orig, "sqlstate", None) in BUSY_SQLSTATES:
+            if getattr(exc.orig, "sqlstate", None) in _BUSY_SQLSTATES:
                 raise ServiceBusy() from exc
             raise
 

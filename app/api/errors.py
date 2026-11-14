@@ -14,9 +14,9 @@ from fastapi.responses import JSONResponse
 from app.application.pay_bulk import ServiceBusy
 from app.domain.bulk_payment import DomainError, IdempotencyKeyReuse
 
-RETRY_AFTER_SECONDS = "1"
+_RETRY_AFTER_SECONDS = "1"
 
-DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {IdempotencyKeyReuse: 400}
+_DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {IdempotencyKeyReuse: 400}
 
 
 class InvalidIdempotencyKey(Exception):
@@ -48,7 +48,7 @@ async def _invalid_idempotency_key(_: Request, __: Exception) -> JSONResponse:
 
 async def _domain_error(_: Request, exc: Exception) -> JSONResponse:
     error = _expect(exc, DomainError)
-    status = DOMAIN_ERROR_STATUS.get(type(error), 422)
+    status = _DOMAIN_ERROR_STATUS.get(type(error), 422)
     return JSONResponse(status_code=status, content={"error": error.code})
 
 
@@ -56,7 +56,7 @@ async def _service_busy(_: Request, __: Exception) -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={"error": "busy"},
-        headers={"Retry-After": RETRY_AFTER_SECONDS},
+        headers={"Retry-After": _RETRY_AFTER_SECONDS},
     )
 
 

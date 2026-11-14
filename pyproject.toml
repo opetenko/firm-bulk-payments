@@ -24,6 +24,10 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
+# Preview is on only for rules selected by their exact code (PLC2701 below);
+# no other preview rule is activated.
+preview = true
+explicit-preview-rules = true
 select = [
     "E", "W",  # pycodestyle
     "F",       # pyflakes: unused imports/variables, undefined names
@@ -35,6 +39,10 @@ select = [
     "SIM",     # simplifications
     "PT",      # pytest style
     "RUF",     # ruff-specific
+    # No `from x import _private` across top-level packages: tests/, scripts/ and
+    # migrations/ cannot use app internals. Not enforced between modules inside app/
+    # (the rule treats one root package as one unit); there, review and CLAUDE.md apply.
+    "PLC2701",
 ]
 ignore = [
     "N818",    # domain errors are named as business facts (InsufficientFunds), not *Error

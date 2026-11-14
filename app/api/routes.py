@@ -9,7 +9,7 @@ from app.application.pay_bulk import PayBulk
 router = APIRouter()
 
 
-def get_pay_bulk(request: Request) -> PayBulk:
+def _get_pay_bulk(request: Request) -> PayBulk:
     """The use case built by create_app(): the API never touches the engine itself."""
     pay_bulk = request.app.state.pay_bulk  # app.state is untyped: check, don't trust
     if not isinstance(pay_bulk, PayBulk):
@@ -28,7 +28,7 @@ def health() -> dict[str, str]:
 def create_bulk_payment(
     body: BulkPaymentRequest,
     response: Response,
-    pay_bulk: Annotated[PayBulk, Depends(get_pay_bulk)],
+    pay_bulk: Annotated[PayBulk, Depends(_get_pay_bulk)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> BulkPaymentResponse:
     try:

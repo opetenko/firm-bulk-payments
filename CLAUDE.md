@@ -16,6 +16,14 @@ Types are how this codebase turns runtime errors into check-time errors.
 - Generic containers always carry their element types (`dict[str, int]`, not `dict`).
 - Money is `int` cents everywhere past the API schemas; never `float`.
 
+## Encapsulation rule
+
+Expose as little as possible. A module-level name that no other module imports gets a
+leading underscore. Keep public only real cross-module contracts, plus names that appear in
+the public API (route handler names become OpenAPI `operationId`s, Pydantic model names
+become schema names). Never import another module's `_name`; ruff `PLC2701` enforces this
+for tests/, scripts/ and migrations/, but not between modules inside app/.
+
 ## Before handing over a change
 
 ```bash

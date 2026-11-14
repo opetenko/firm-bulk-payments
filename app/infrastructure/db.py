@@ -1,5 +1,4 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from app.config import database_url, db_pool_size, db_pool_timeout_seconds
 
@@ -14,4 +13,3 @@ engine = create_engine(
     max_overflow=0,
     pool_timeout=db_pool_timeout_seconds(),
 )
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

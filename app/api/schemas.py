@@ -19,10 +19,10 @@ from app.domain.bulk_payment import BulkPaymentCommand, PaymentItem
 from app.domain.money import parse_amount_to_cents
 
 MAX_PAYMENTS = 1000
-MAX_DESCRIPTION_LENGTH = 500
+_MAX_DESCRIPTION_LENGTH = 500
 
 # Printable ASCII, space included. [\x20-\x7E] is explicit, so it is unaffected by Unicode.
-IDEMPOTENCY_KEY_RE = re.compile(r"[\x20-\x7E]{1,255}")
+_IDEMPOTENCY_KEY_RE = re.compile(r"[\x20-\x7E]{1,255}")
 
 
 def _parse_amount(value: object) -> int:  # object, not Any: unknown input must be checked
@@ -32,15 +32,15 @@ def _parse_amount(value: object) -> int:  # object, not Any: unknown input must 
     return parse_amount_to_cents(value)
 
 
-Cents = Annotated[int, BeforeValidator(_parse_amount)]
+_Cents = Annotated[int, BeforeValidator(_parse_amount)]
 
 
 class PaymentIn(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    amount_cents: Cents = Field(alias="amount")
+    amount_cents: _Cents = Field(alias="amount")
     payee_firm_uuid: UUID
-    description: StrictStr = Field(min_length=1, max_length=MAX_DESCRIPTION_LENGTH)
+    description: StrictStr = Field(min_length=1, max_length=_MAX_DESCRIPTION_LENGTH)
 
 
 class BulkPaymentRequest(BaseModel):
@@ -70,12 +70,8 @@ class BulkPaymentResponse(BaseModel):
     total_cents: int
 
 
-class ErrorResponse(BaseModel):
-    error: str
-
-
 def validate_idempotency_key(value: str | None) -> str:
     """Return the key unchanged, or raise ValueError if missing or malformed."""
-    if value is None or not IDEMPOTENCY_KEY_RE.fullmatch(value):
+    if value is None or not _IDEMPOTENCY_KEY_RE.fullmatch(value):
         raise ValueError("Idempotency-Key must be 1-255 printable ASCII characters")
     return value
