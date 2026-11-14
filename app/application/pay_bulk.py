@@ -1,8 +1,9 @@
 """PayBulk use case: one READ COMMITTED transaction with idempotency (ADR 0001).
 
-No retry loop: firms are locked in id order, so deadlocks cannot happen; a lock
-or statement timeout raises ServiceBusy (HTTP 503) and the client retries safely
-with the same Idempotency-Key, because nothing was written.
+No retry loop: firms are locked in id order, so deadlocks cannot happen. A lock
+timeout, statement timeout or connection-pool timeout raises ServiceBusy
+(HTTP 503) and the client retries safely with the same Idempotency-Key, because
+nothing was written.
 """
 
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from uuid import uuid4
 
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from app.domain.bulk_payment import (
     BulkPaymentCommand,
@@ -120,6 +122,8 @@ class PayBulk:
                     {payer.id: -total_cents}
                     | {locked[uuid].id: cents for uuid, cents in credits.items()},
                 )
+        except PoolTimeoutError as exc:  # no free connection within pool_timeout
+            raise ServiceBusy() from exc
         except OperationalError as exc:
             if getattr(exc.orig, "sqlstate", None) in BUSY_SQLSTATES:
                 raise ServiceBusy() from exc

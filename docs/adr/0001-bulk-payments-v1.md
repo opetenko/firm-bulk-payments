@@ -47,7 +47,7 @@ Responses, in evaluation order (first match wins):
 | 4 | Key already applied, different request | 400 `{"error": "idempotency_key_reuse"}` |
 | 5 | Key already applied, same request | 201, original body, header `Idempotent-Replayed: true` |
 | 6 | Total exceeds payer balance | 422 `{"error": "insufficient_funds"}` |
-| 7 | Lock or statement timeout | 503 `{"error": "busy"}`, `Retry-After` header |
+| 7 | Lock, statement or connection-pool timeout | 503 `{"error": "busy"}`, `Retry-After` header |
 | 8 | Success | 201 `{"batch_uuid": "...", "payment_ids": [...], "total_cents": N}` |
 
 Only successful requests are recorded. A request rejected with 422/503 writes nothing, so a retry
@@ -104,7 +104,7 @@ BEGIN
 
   SELECT ... FROM payment_batches WHERE payer_firm_id = :payer_id AND idempotency_key = :key
   found, fingerprint differs           -> ROLLBACK, 400 idempotency_key_reuse
-  found                                -> read payment ids ORDER BY id, ROLLBACK, 201 replay
+  found                                -> read payment ids ORDER BY id, COMMIT (read-only), 201 replay
 
   payer.balance_cents < total          -> ROLLBACK, 422 insufficient_funds
 
@@ -130,8 +130,10 @@ COMMIT -> 201
 6. **Stable replay.** Payment ids are returned in request order and replayed with `ORDER BY id`,
    so the replay body is byte-identical to the original.
 
-Verified by tests against real PostgreSQL (not SQLite): concurrent drain of one payer,
-concurrent A↔B payments, concurrent requests with one key.
+Verified by `tests/test_concurrency.py` against real PostgreSQL (not SQLite), 20 concurrent
+transactions per scenario: drain of one payer, firms paying each other (pairs and 3-cycles),
+one key sent concurrently with the same and with different bodies, and a random mix checked
+for conservation. Variants with unordered or missing locks fail these tests.
 
 ### Code structure
 
@@ -148,7 +150,10 @@ imports nothing from other layers.
 ### Deployment
 
 The app is stateless: two or more replicas behind nginx (round-robin, runtime DNS).
-Correctness relies only on PostgreSQL row locks, so it holds across processes. Migrations
+Correctness relies only on PostgreSQL row locks, so it holds across processes. Each replica
+has a fixed pool (`DB_POOL_SIZE`, default 20, no overflow; replicas × pool size must stay
+below PostgreSQL's `max_connections`). A request that gets no connection within
+`DB_POOL_TIMEOUT_SECONDS` (default 2, equal to `lock_timeout`) gets 503 busy. Migrations
 run once in a dedicated job before the replicas start. Demo firms are inserted by
 `scripts/seed.py`, never by a migration.
 

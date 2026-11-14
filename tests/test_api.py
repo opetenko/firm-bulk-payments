@@ -2,12 +2,13 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, create_engine, func, select
 
 from app.application.pay_bulk import PayBulk
 from app.infrastructure import store
 from app.infrastructure.tables import firms, payment_batches
 from app.main import create_app
+from tests.conftest import TEST_DATABASE_URL
 
 PINECREST = "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41"
 LOPEZ = "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10"
@@ -189,3 +190,21 @@ def test_lock_timeout_returns_503_with_retry_after(client: TestClient, clean_eng
 
     # Nothing was written, so the client's retry with the same key succeeds.
     assert post(client, SPEC_BODY).status_code == 201
+
+
+def test_exhausted_connection_pool_returns_503_not_500(clean_engine: Engine) -> None:
+    tiny = create_engine(TEST_DATABASE_URL, pool_size=1, max_overflow=0, pool_timeout=0.2)
+    client = TestClient(create_app(PayBulk(tiny)), raise_server_exceptions=False)
+    try:
+        held = tiny.connect()  # every connection of this replica is in use
+
+        response = post(client, SPEC_BODY)
+
+        assert response.status_code == 503
+        assert response.json() == {"error": "busy"}
+        assert response.headers["Retry-After"] == "1"
+
+        held.close()
+        assert post(client, SPEC_BODY).status_code == 201  # retry once a connection is free
+    finally:
+        tiny.dispose()
