@@ -40,7 +40,8 @@ Responses, in evaluation order (first match wins):
 
 | # | Condition | Response |
 |---|-----------|----------|
-| 1 | Malformed JSON, wrong types, bad amount, empty/oversized `payments`, bad/missing header | 400 |
+| 1 | Malformed JSON, wrong types, bad amount, empty/oversized `payments` | 400 `{"error": "invalid_request", "detail": [...]}` |
+| 1 | Missing or malformed `Idempotency-Key` | 400 `{"error": "invalid_idempotency_key"}` |
 | 2 | Payer listed as a payee | 422 `{"error": "self_payment"}` |
 | 3 | Unknown payer or payee UUID | 422 `{"error": "unknown_firm"}` |
 | 4 | Key already applied, different request | 400 `{"error": "idempotency_key_reuse"}` |
