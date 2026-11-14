@@ -1,7 +1,7 @@
 .PHONY: up down logs db test cov lint fmt typecheck check migrate seed
 
 up:        ## build and start db, migrate job, 2 app replicas, nginx on :8000
-	docker compose up -d --build
+	docker compose up -d --build --wait
 
 down:      ## stop everything and drop the database volume
 	docker compose down -v
