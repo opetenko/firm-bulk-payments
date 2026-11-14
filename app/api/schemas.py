@@ -10,7 +10,7 @@ hyphenated form the database stores.
 """
 
 import re
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictStr
@@ -25,7 +25,7 @@ MAX_DESCRIPTION_LENGTH = 500
 IDEMPOTENCY_KEY_RE = re.compile(r"[\x20-\x7E]{1,255}")
 
 
-def _parse_amount(value: Any) -> int:
+def _parse_amount(value: object) -> int:  # object, not Any: unknown input must be checked
     # A JSON number must not slip through as a str or an int: amounts are strings only.
     if not isinstance(value, str):
         raise ValueError("amount must be a string")

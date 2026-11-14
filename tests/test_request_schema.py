@@ -9,11 +9,14 @@ LOPEZ = "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10"
 NAIR = "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25"
 
 
-def payment(amount: object = "100", payee: str = LOPEZ, description: object = "work") -> dict:
+Json = dict[str, object]
+
+
+def payment(amount: object = "100", payee: str = LOPEZ, description: object = "work") -> Json:
     return {"amount": amount, "payee_firm_uuid": payee, "description": description}
 
 
-def request(*payments: dict, payer: str = PINECREST) -> dict:
+def request(*payments: Json, payer: str = PINECREST) -> Json:
     return {"payer_firm_uuid": payer, "payments": list(payments) or [payment()]}
 
 
@@ -76,7 +79,7 @@ def test_max_payments_accepted() -> None:
         pytest.param({"payer_firm_uuid": PINECREST, "payments": "x"}, id="payments_not_list"),
     ],
 )
-def test_invalid_body_rejected(body: dict) -> None:
+def test_invalid_body_rejected(body: Json) -> None:
     with pytest.raises(ValidationError):
         BulkPaymentRequest.model_validate(body)
 
@@ -91,5 +94,5 @@ def test_idempotency_key_valid(key: str) -> None:
     [None, "", "x" * 256, "line\nbreak", "tab\there", "café", "\x7f"],
 )
 def test_idempotency_key_invalid(key: str | None) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Idempotency-Key must be"):
         validate_idempotency_key(key)

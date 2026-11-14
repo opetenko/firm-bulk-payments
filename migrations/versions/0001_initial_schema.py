@@ -53,9 +53,7 @@ def upgrade() -> None:
     op.create_table(
         "payments",
         sa.Column("id", sa.BigInteger(), sa.Identity(always=True), primary_key=True),
-        sa.Column(
-            "batch_id", sa.BigInteger(), sa.ForeignKey("payment_batches.id"), nullable=False
-        ),
+        sa.Column("batch_id", sa.BigInteger(), sa.ForeignKey("payment_batches.id"), nullable=False),
         sa.Column("payer_firm_id", sa.BigInteger(), sa.ForeignKey("firms.id"), nullable=False),
         sa.Column("payee_firm_id", sa.BigInteger(), sa.ForeignKey("firms.id"), nullable=False),
         sa.Column("amount_cents", sa.BigInteger(), nullable=False),

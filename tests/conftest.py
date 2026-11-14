@@ -53,9 +53,7 @@ def migrated_engine() -> Iterator[Engine]:
 
 def _reset_data(engine: Engine) -> None:
     with engine.begin() as conn:
-        conn.execute(
-            text("TRUNCATE payments, payment_batches, firms RESTART IDENTITY CASCADE")
-        )
+        conn.execute(text("TRUNCATE payments, payment_batches, firms RESTART IDENTITY CASCADE"))
         seed(conn)
 
 

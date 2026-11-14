@@ -1,5 +1,6 @@
 """POST /bulk-payments against the response table of ADR 0001."""
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, func, select
@@ -19,13 +20,21 @@ SPEC_BODY = {
     "payer_firm_uuid": PINECREST,
     "payments": [
         {"amount": "6250", "payee_firm_uuid": NAIR, "description": "Overflow returns, August 2026"},
-        {"amount": "5800.5", "payee_firm_uuid": NAIR, "description": "Amended returns, August 2026"},
-        {"amount": "1200.75", "payee_firm_uuid": LOPEZ, "description": "Bookkeeping cleanup, 3 clients"},
+        {
+            "amount": "5800.5",
+            "payee_firm_uuid": NAIR,
+            "description": "Amended returns, August 2026",
+        },
+        {
+            "amount": "1200.75",
+            "payee_firm_uuid": LOPEZ,
+            "description": "Bookkeeping cleanup, 3 clients",
+        },
     ],
 }
 
 
-def body(*payments: tuple[str, str], payer: str = PINECREST) -> dict:
+def body(*payments: tuple[str, str], payer: str = PINECREST) -> dict[str, object]:
     return {
         "payer_firm_uuid": payer,
         "payments": [{"amount": a, "payee_firm_uuid": p, "description": "x"} for a, p in payments],
@@ -39,7 +48,7 @@ def balances(engine: Engine) -> dict[str, int]:
 
 def batch_count(engine: Engine) -> int:
     with engine.connect() as conn:
-        return conn.scalar(select(func.count()).select_from(payment_batches))
+        return conn.execute(select(func.count()).select_from(payment_batches)).scalar_one()
 
 
 @pytest.fixture
@@ -47,9 +56,10 @@ def client(clean_engine: Engine) -> TestClient:
     return TestClient(create_app(PayBulk(clean_engine, lock_timeout_ms=100)))
 
 
-def post(client: TestClient, json: object, key: str | None = "key-1", **kwargs):
+def post(client: TestClient, json: object, key: str | None = "key-1") -> httpx.Response:
     headers = {} if key is None else {"Idempotency-Key": key}
-    return client.post("/bulk-payments", json=json, headers=headers, **kwargs)
+    response: httpx.Response = client.post("/bulk-payments", json=json, headers=headers)
+    return response
 
 
 # --- 201 ----------------------------------------------------------------------
@@ -105,14 +115,16 @@ def test_same_key_different_body_returns_400(client: TestClient, clean_engine: E
 @pytest.mark.parametrize(
     ("request_body", "error"),
     [
-        pytest.param(body(("500.01", NAIR), payer=LOPEZ), "insufficient_funds", id="insufficient_funds"),
+        pytest.param(
+            body(("500.01", NAIR), payer=LOPEZ), "insufficient_funds", id="insufficient_funds"
+        ),
         pytest.param(body(("1", NAIR), payer=UNKNOWN), "unknown_firm", id="unknown_payer"),
         pytest.param(body(("1", UNKNOWN)), "unknown_firm", id="unknown_payee"),
         pytest.param(body(("1", NAIR), ("1", PINECREST)), "self_payment", id="self_payment"),
     ],
 )
 def test_business_error_returns_422_and_writes_nothing(
-    client: TestClient, clean_engine: Engine, request_body: dict, error: str
+    client: TestClient, clean_engine: Engine, request_body: dict[str, object], error: str
 ) -> None:
     before = balances(clean_engine)
 
@@ -136,13 +148,18 @@ def test_business_error_returns_422_and_writes_nothing(
         pytest.param(body(("0", NAIR)), id="zero_amount"),
         pytest.param({**SPEC_BODY, "payer_firm_uuid": 42}, id="wrong_type"),
         pytest.param(
-            {**SPEC_BODY, "payments": [{"amount": 300, "payee_firm_uuid": NAIR, "description": "x"}]},
+            {
+                **SPEC_BODY,
+                "payments": [{"amount": 300, "payee_firm_uuid": NAIR, "description": "x"}],
+            },
             id="amount_as_number",
         ),
         pytest.param([SPEC_BODY], id="not_an_object"),
     ],
 )
-def test_invalid_body_returns_400(client: TestClient, clean_engine: Engine, request_body: object) -> None:
+def test_invalid_body_returns_400(
+    client: TestClient, clean_engine: Engine, request_body: object
+) -> None:
     response = post(client, request_body)
 
     assert response.status_code == 400
@@ -163,9 +180,15 @@ def test_malformed_json_returns_400(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "key",
-    [pytest.param(None, id="missing"), pytest.param("", id="empty"), pytest.param("x" * 256, id="too_long")],
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("", id="empty"),
+        pytest.param("x" * 256, id="too_long"),
+    ],
 )
-def test_bad_idempotency_key_returns_400(client: TestClient, clean_engine: Engine, key: str | None) -> None:
+def test_bad_idempotency_key_returns_400(
+    client: TestClient, clean_engine: Engine, key: str | None
+) -> None:
     response = post(client, SPEC_BODY, key=key)
 
     assert response.status_code == 400
@@ -176,7 +199,9 @@ def test_bad_idempotency_key_returns_400(client: TestClient, clean_engine: Engin
 # --- 503 --------------------------------------------------------------------------
 
 
-def test_lock_timeout_returns_503_with_retry_after(client: TestClient, clean_engine: Engine) -> None:
+def test_lock_timeout_returns_503_with_retry_after(
+    client: TestClient, clean_engine: Engine
+) -> None:
     with clean_engine.connect() as other:
         other.begin()
         store.lock_firms(other, [NAIR])

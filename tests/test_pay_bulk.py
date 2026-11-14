@@ -39,8 +39,8 @@ def balances(engine: Engine) -> dict[str, int]:
 def row_counts(engine: Engine) -> tuple[int, int]:
     with engine.connect() as conn:
         return (
-            conn.scalar(select(func.count()).select_from(payment_batches)),
-            conn.scalar(select(func.count()).select_from(payments)),
+            conn.execute(select(func.count()).select_from(payment_batches)).scalar_one(),
+            conn.execute(select(func.count()).select_from(payments)).scalar_one(),
         )
 
 
@@ -149,8 +149,9 @@ def test_insufficient_funds(pay_bulk: PayBulk, clean_engine: Engine) -> None:
     "cmd",
     [
         pytest.param(command(PaymentItem(NAIR, 100, "x"), payer=UNKNOWN), id="unknown_payer"),
-        pytest.param(command(PaymentItem(NAIR, 100, "x"), PaymentItem(UNKNOWN, 100, "y")),
-                     id="unknown_payee"),
+        pytest.param(
+            command(PaymentItem(NAIR, 100, "x"), PaymentItem(UNKNOWN, 100, "y")), id="unknown_payee"
+        ),
     ],
 )
 def test_unknown_firm(pay_bulk: PayBulk, clean_engine: Engine, cmd: BulkPaymentCommand) -> None:

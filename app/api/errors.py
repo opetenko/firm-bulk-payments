@@ -23,23 +23,36 @@ class InvalidIdempotencyKey(Exception):
     """The Idempotency-Key header is missing or malformed."""
 
 
-async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+def _expect[E: Exception](exc: Exception, kind: type[E]) -> E:
+    """Narrow the handler argument to the type the handler was registered for.
+
+    Starlette types every handler as (Request, Exception). A checked narrowing
+    instead of cast(): a handler registered for the wrong type fails loudly.
+    """
+    if not isinstance(exc, kind):
+        raise TypeError(f"handler for {kind.__name__} received {type(exc).__name__}")
+    return exc
+
+
+async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
+    errors = _expect(exc, RequestValidationError).errors()
     return JSONResponse(
         status_code=400,
-        content={"error": "invalid_request", "detail": jsonable_encoder(exc.errors())},
+        content={"error": "invalid_request", "detail": jsonable_encoder(errors)},
     )
 
 
-async def _invalid_idempotency_key(_: Request, __: InvalidIdempotencyKey) -> JSONResponse:
+async def _invalid_idempotency_key(_: Request, __: Exception) -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": "invalid_idempotency_key"})
 
 
-async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:
-    status = DOMAIN_ERROR_STATUS.get(type(exc), 422)
-    return JSONResponse(status_code=status, content={"error": exc.code})
+async def _domain_error(_: Request, exc: Exception) -> JSONResponse:
+    error = _expect(exc, DomainError)
+    status = DOMAIN_ERROR_STATUS.get(type(error), 422)
+    return JSONResponse(status_code=status, content={"error": error.code})
 
 
-async def _service_busy(_: Request, __: ServiceBusy) -> JSONResponse:
+async def _service_busy(_: Request, __: Exception) -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={"error": "busy"},

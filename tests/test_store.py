@@ -1,4 +1,5 @@
 import pytest
+from psycopg.errors import LockNotAvailable
 from sqlalchemy import Connection, Engine, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -56,7 +57,8 @@ def test_locked_firm_blocks_another_transaction_until_lock_timeout(
         with pytest.raises(OperationalError) as exc:
             store.lock_firms(waiter, [LOPEZ, NAIR])
 
-        assert exc.value.orig.sqlstate == "55P03"  # lock_not_available -> 503 busy
+        # SQLSTATE 55P03 lock_not_available -> 503 busy
+        assert isinstance(exc.value.orig, LockNotAvailable)
         waiter.rollback()
         holder.rollback()
 
@@ -79,8 +81,9 @@ def test_spec_example_written_and_found_again(db: Connection) -> None:
 
     # payment_ids[i] is the row of items[i]
     rows = db.execute(
-        select(payments.c.id, payments.c.payee_firm_id, payments.c.amount_cents,
-               payments.c.description).where(payments.c.batch_id == batch_id)
+        select(
+            payments.c.id, payments.c.payee_firm_id, payments.c.amount_cents, payments.c.description
+        ).where(payments.c.batch_id == batch_id)
     ).all()
     by_id = {r.id: NewPayment(r.payee_firm_id, r.amount_cents, r.description) for r in rows}
     assert [by_id[pid] for pid in payment_ids] == items

@@ -22,7 +22,7 @@ def command(*items: PaymentItem, payer: str = PINECREST, key: str = "key-1") -> 
     return BulkPaymentCommand(payer_firm_uuid=payer, idempotency_key=key, items=items)
 
 
-def from_json(body: dict, key: str = "key-1") -> BulkPaymentCommand:
+def from_json(body: dict[str, object], key: str = "key-1") -> BulkPaymentCommand:
     return BulkPaymentRequest.model_validate(body).to_command(key)
 
 
@@ -69,26 +69,34 @@ def test_spec_example_is_not_self_payment() -> None:
 def test_fingerprint_is_sha256_hex() -> None:
     fp = SPEC_EXAMPLE.fingerprint()
 
-    assert len(fp) == 64 and all(c in "0123456789abcdef" for c in fp)
+    assert len(fp) == 64
+    assert set(fp) <= set("0123456789abcdef")
 
 
 def test_fingerprint_ignores_amount_and_uuid_spelling() -> None:
     a = from_json(
-        {"payer_firm_uuid": PINECREST,
-         "payments": [{"amount": "300", "payee_firm_uuid": LOPEZ, "description": "x"}]}
+        {
+            "payer_firm_uuid": PINECREST,
+            "payments": [{"amount": "300", "payee_firm_uuid": LOPEZ, "description": "x"}],
+        }
     )
     b = from_json(
-        {"payer_firm_uuid": PINECREST.upper(),
-         "payments": [{"amount": "300.00", "payee_firm_uuid": LOPEZ.upper(), "description": "x"}]}
+        {
+            "payer_firm_uuid": PINECREST.upper(),
+            "payments": [
+                {"amount": "300.00", "payee_firm_uuid": LOPEZ.upper(), "description": "x"}
+            ],
+        }
     )
 
     assert a.fingerprint() == b.fingerprint()
 
 
 def test_fingerprint_ignores_idempotency_key() -> None:
-    assert command(PaymentItem(LOPEZ, 1, "x"), key="a").fingerprint() == command(
-        PaymentItem(LOPEZ, 1, "x"), key="b"
-    ).fingerprint()
+    assert (
+        command(PaymentItem(LOPEZ, 1, "x"), key="a").fingerprint()
+        == command(PaymentItem(LOPEZ, 1, "x"), key="b").fingerprint()
+    )
 
 
 @pytest.mark.parametrize(

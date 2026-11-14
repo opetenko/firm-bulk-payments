@@ -35,7 +35,9 @@ class NewPayment:
     description: str
 
 
-def set_local_timeouts(conn: Connection, *, lock_timeout_ms: int, statement_timeout_ms: int) -> None:
+def set_local_timeouts(
+    conn: Connection, *, lock_timeout_ms: int, statement_timeout_ms: int
+) -> None:
     """Timeouts for the current transaction only.
 
     set_config(..., true) instead of SET LOCAL: SET does not accept bind parameters.
@@ -102,7 +104,8 @@ def insert_batch(
     total_cents: int,
     payments_count: int,
 ) -> int:
-    return conn.execute(
+    # Core columns are untyped (Any); the annotation states what the schema guarantees.
+    batch_id: int = conn.execute(
         insert(payment_batches)
         .values(
             uuid=uuid,
@@ -114,6 +117,7 @@ def insert_batch(
         )
         .returning(payment_batches.c.id)
     ).scalar_one()
+    return batch_id
 
 
 def insert_payments(

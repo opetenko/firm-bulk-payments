@@ -7,7 +7,7 @@ replicas look like to the database.
 
 import random
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -35,7 +35,7 @@ Outcome = PayBulkResult | Exception
 
 
 @pytest.fixture
-def engine(clean_engine: Engine):
+def engine(clean_engine: Engine) -> Iterator[Engine]:
     """A pool big enough that every thread holds its own connection at once."""
     pooled = create_engine(TEST_DATABASE_URL, pool_size=THREADS, max_overflow=0)
     yield pooled
@@ -48,9 +48,7 @@ def pay_bulk(engine: Engine) -> PayBulk:
     return PayBulk(engine, lock_timeout_ms=10_000, statement_timeout_ms=20_000)
 
 
-def run_concurrently(
-    pay_bulk: PayBulk, commands: Sequence[BulkPaymentCommand]
-) -> list[Outcome]:
+def run_concurrently(pay_bulk: PayBulk, commands: Sequence[BulkPaymentCommand]) -> list[Outcome]:
     """Run every command in its own thread, all released at the same moment."""
     barrier = threading.Barrier(len(commands))
 
@@ -65,7 +63,7 @@ def run_concurrently(
         return list(pool.map(call, commands))
 
 
-def of_type(outcomes: list[Outcome], kind: type) -> list:
+def of_type[T](outcomes: list[Outcome], kind: type[T]) -> list[T]:
     return [o for o in outcomes if isinstance(o, kind)]
 
 
@@ -77,8 +75,8 @@ def balances(engine: Engine) -> dict[str, int]:
 def counts(engine: Engine) -> tuple[int, int]:
     with engine.connect() as conn:
         return (
-            conn.scalar(select(func.count()).select_from(payment_batches)),
-            conn.scalar(select(func.count()).select_from(payments)),
+            conn.execute(select(func.count()).select_from(payment_batches)).scalar_one(),
+            conn.execute(select(func.count()).select_from(payments)).scalar_one(),
         )
 
 

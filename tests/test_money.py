@@ -22,9 +22,27 @@ def test_parse_amount_to_cents_valid(amount: str, cents: int) -> None:
 
 @pytest.mark.parametrize(
     "amount",
-    ["0", "0.00", "0.0", "-5", "+5", "1.", ".5", "1e3", " 5", "5 ", "5\n", "1,000",
-     "1.234", "1234567890", "", "١٢٣", "NaN", "inf"],
+    [
+        "0",
+        "0.00",
+        "0.0",
+        "-5",
+        "+5",
+        "1.",
+        ".5",
+        "1e3",
+        " 5",
+        "5 ",
+        "5\n",
+        "1,000",
+        "1.234",
+        "1234567890",
+        "",
+        "١٢٣",
+        "NaN",
+        "inf",
+    ],
 )
 def test_parse_amount_to_cents_invalid(amount: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^amount must "):
         parse_amount_to_cents(amount)

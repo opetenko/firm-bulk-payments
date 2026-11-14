@@ -11,7 +11,10 @@ router = APIRouter()
 
 def get_pay_bulk(request: Request) -> PayBulk:
     """The use case built by create_app(): the API never touches the engine itself."""
-    return request.app.state.pay_bulk
+    pay_bulk = request.app.state.pay_bulk  # app.state is untyped: check, don't trust
+    if not isinstance(pay_bulk, PayBulk):
+        raise RuntimeError("app.state.pay_bulk is not configured; build the app with create_app()")
+    return pay_bulk
 
 
 @router.get("/health")
